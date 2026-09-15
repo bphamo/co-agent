@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "co-agent"
+version = "0.1.0"
+description = "A hand-written Claude agent loop, plus the FR9 simulation service."
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=1.5",
+    "numpy>=2.0",
+    "pydantic>=2.7",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+co-agent = "co_agent.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["co_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
