@@ -23,7 +23,7 @@ import numpy as np
 #: Identifies the simulator's behaviour.  Bump it on any change that would move
 #: a figure, so a stored ``null_probability`` can be invalidated rather than
 #: silently compared against one produced by different code.
-VERSION = "sim/1"
+VERSION = "sim/2"
 
 
 class Method(StrEnum):
@@ -141,6 +141,8 @@ class Params:
     history_sha256: str
     seed: int
     gate_band: tuple[float, float]
+    interval_method: str | None = None
+    outer_resamples: int | None = None
     ewma_lambda: float | None = None
     ewma_warmup: int | None = None
     sigma_current: float | None = None

@@ -32,7 +32,7 @@ from .params import (
     new_proxy_history,
     sha256_returns,
 )
-from .simulate import Config, Request, Result, run
+from .simulate import Config, Interval, Request, Result, run
 
 __all__ = [
     "VERSION",
@@ -42,6 +42,7 @@ __all__ = [
     "Drift",
     "Falsifier",
     "History",
+    "Interval",
     "InsufficientHistoryError",
     "Method",
     "Params",

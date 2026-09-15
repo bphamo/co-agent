@@ -43,27 +43,82 @@ pins the property that motivates blocks in the first place — and shows that at
 `mean_block_len = 1` the dependence is gone, which is the IID/GBM behaviour FR9
 rejects.
 
-**The null is conditioned on the current volatility regime.** Returns are
-standardised by their own one-step-ahead EWMA volatility and re-inflated at the
-latest forecast. An unconditional null for "down 15% in 60 days" is wrong in both
-directions depending on where volatility sits today, and it is the figure the
-0.3–0.7 gate keys off. `test_conditioning_on_current_vol_moves_the_null` holds
-two histories with identical pooled observations in opposite order and shows the
-conditional estimates differ by more than 10 points while the unconditional ones
-barely move. The re-inflation holds volatility flat across the horizon — a
-mean-reverting vol path would be more faithful, and `cond_vol` in `sim_params` is
-what lets these figures be invalidated rather than quietly replaced.
+**Volatility conditioning is off by default, on measured evidence.** An earlier
+version of this package conditioned the null on the current volatility regime by
+default, on the argument that an unconditional estimate of "down 15% in 60 days"
+is wrong in both directions depending on where volatility sits today. The
+argument is right; the implementation trades one error for a larger one, because
+re-inflating at the latest forecast holds volatility *flat across the whole
+horizon*. Measured against known truth on the synthetic panel (mean absolute
+error, lower is better):
 
-**The gate has a third answer.** FR9 says a `null_probability` outside 0.3–0.7
-returns the falsifier for restatement. Taken literally, a falsifier whose true
-null probability sits at 0.30 is accepted or bounced on Monte Carlo noise, and
-the researcher reads a coin flip as signal. `run` therefore judges the Wilson
-interval, not the point estimate: a verdict is only returned when the interval
-settles the question. When it straddles a band edge, `run` buys precision
-(escalating the path count up to `max_paths`) and, if that still does not settle
-it, returns `indeterminate`. **Callers must not treat `indeterminate` as a
-rejection** — the value is genuinely near the boundary and the call belongs to a
-human.
+| process | h=5 | h=10 | h=20 | h=60 | h=120 |
+|---|---|---|---|---|---|
+| GARCH(1,1), conditioning off | .068 | .070 | .070 | **.059** | **.048** |
+| GARCH(1,1), conditioning on | **.025** | **.034** | **.041** | .062 | .080 |
+| regime-switching, off | .168 | .164 | .140 | **.081** | **.056** |
+| regime-switching, on | **.115** | **.110** | **.113** | .148 | .174 |
+
+The crossover sits between 20 and 60 days on both processes, near the
+volatility half-life (~34 days for this GARCH parameterisation). The TRD's
+default horizon is 60 days, past the crossover, so `cond_vol` defaults to
+`False`. Turn it on for short-horizon theses; `sim_params` records which was
+used either way. Reproduce with
+`python -m co_agent.sim.validate --horizon 20 --cond-vol`.
+
+**The gate judges an interval, and the interval is not Monte Carlo error.** FR9
+says a `null_probability` outside 0.3–0.7 returns the falsifier for restatement.
+Taken literally, a falsifier whose true null probability sits at 0.30 is accepted
+or bounced on simulation noise, so `run` judges an interval rather than the point
+estimate and returns `indeterminate` when the interval straddles a band edge.
+**Callers must not treat `indeterminate` as a rejection** — the value is near the
+boundary and the call belongs to a human.
+
+Which interval turns out to matter more than the hysteresis. The Wilson interval
+on the path count describes Monte Carlo error alone, and measured against known
+truth it covers 3–42% of the time instead of 95%: at 10,000 paths it is ~0.019
+wide while the estimator's real error is 0.015–0.081. A gate judging it is
+confident about the wrong quantity, and escalating the path count narrows an
+error term that was never dominant.
+
+`Interval.DOUBLE_BOOTSTRAP` (the default) resamples the history itself and takes
+the spread of the resulting estimates:
+
+| process | true p | bias | MAE | coverage (MC) | coverage (double) | width (double) |
+|---|---|---|---|---|---|---|
+| IID normal | 0.369 | +0.000 | 0.015 | 0.42 | **1.00** | 0.066 |
+| Student-t(4) | 0.351 | +0.004 | 0.020 | 0.33 | **0.95** | 0.080 |
+| GARCH(1,1) | 0.325 | +0.021 | 0.059 | 0.05 | 0.40 | 0.088 |
+| regime-switching | 0.269 | +0.024 | 0.081 | 0.03 | 0.35 | 0.119 |
+
+It reaches nominal coverage where the process has no state, and improves the
+state-dependent cases 5–10× without fixing them: block-resampling a history
+scrambles the state that history *ended in*, which is the part the estimator
+cannot represent anyway. This is the honest interval available, not a correct
+one. Because its width is a property of the history rather than of compute, path
+escalation cannot resolve an indeterminate verdict, and is therefore confined to
+`Interval.MC`.
+
+**With that interval the gate discriminates correctly.** Sweeping the falsifier
+threshold so truth spans the band (verdicts as accept/reject/indeterminate over
+12 trials, regime-switching process):
+
+| threshold | true p | verdicts |
+|---|---|---|
+| 4% | 0.657 (inside) | 4 / 0 / 8 |
+| 8% | 0.441 (inside) | **12 / 0 / 0** |
+| 12% | 0.291 (just outside) | 1 / 1 / 10 |
+| 20% | 0.117 (outside) | **0 / 12 / 0** |
+| 30% | 0.030 (outside) | **0 / 12 / 0** |
+
+Mid-band accepts, clearly-outside rejects, and `indeterminate` concentrated in a
+collar of roughly ±0.03 around the edges — which is what it is for. Reported at
+a single threshold the error rates look alarming (57% "false reject" on this
+process with the MC interval); the sweep shows that headline is a boundary
+artifact, and that the fix is the interval, not a wider band. On this evidence
+TRD open question 7 — should the band widen for high-conviction theses — does not
+need a yes; the cost of the 0.3–0.7 band is a 30–75% indeterminate rate near its
+edges, not misclassification.
 
 **Event falsifiers are a first-class class.** A bootstrap over returns cannot
 price "guides below $X in Q3" or "the 10-Q shows inventory up >20%". Requiring
@@ -110,6 +165,53 @@ theses in one batch do not share a path set.
 method): the smallest observed drawdown that at least 95% of paths do not exceed.
 Pinned by a test, because a stored figure is only comparable to another one
 computed the same way.
+
+## Validating the number
+
+`null_probability` is a reference the rest of the system leans on: the 0.3–0.7
+gate keys off it, and FR7 reports calibration net of it. If it is biased, the
+gate rejects sound falsifiers and every Brier skill score is wrong by an unknown
+amount. So it has its own validation, in two parts.
+
+**Bias study** — `co_agent/sim/dgp.py` plus `bias_study` in `validate.py`. Real
+data has no known answer: you observe one realisation and cannot ask it what the
+probability *was*. A synthetic process can be asked, by simulating forward from a
+known state, which is the only way to measure bias rather than self-consistency.
+The panel is an IID baseline, Student-t for tails without clustering, GARCH(1,1)
+for clustering, and a regime-switching process built to defeat an unconditional
+estimator. Every table above came from it:
+
+```
+python -m co_agent.sim.validate                                  # fast, MC interval
+python -m co_agent.sim.validate --interval double_bootstrap      # the honest width
+```
+
+**Historical walk-forward** — `walk_forward` and `reliability` in `validate.py`.
+At each origin, predict using only prior data (enforced by slicing, not
+convention), then observe whether the falsifier actually tripped. Truth is
+unknowable per observation, but predicted probability can be compared against
+realised frequency in bins. No price data ships here; see
+`co_agent/data/prices.py` for the CSV format and for the two data properties that
+matter more than the loader — a point-in-time universe, and adjusted closes.
+
+```
+python -m co_agent.sim.validate --prices ./path/to/csvs
+```
+
+Windows are non-overlapping by default, because sampling daily gives thousands of
+observations of nearly the same event; effective sample size is roughly span ÷
+horizon. Intervals on realised frequency are bootstrapped over observations
+rather than binomial, since symbols move together. Every row carries its `n`.
+
+Neither part substitutes for the other. A process that flatters the estimator and
+history that does not means the panel is too kind; passing on the panel and
+failing on history localises the problem to a property the panel omits.
+
+**Still to run:** the falsifier-threshold sweep above covers one process and one
+falsifier family. The same sweep across `TerminalBelow` and `DrawdownExceeds`, and
+across horizon buckets, would say whether some falsifier *shapes* are
+intrinsically easier to estimate than others — which would be worth knowing before
+FR3's horizon policy is revisited against the ledger.
 
 ## What this does not do
 

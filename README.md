@@ -8,6 +8,9 @@ Python 3.11+.
 ```
 co_agent/           the agent loop and its tools
 co_agent/sim/       the FR9 simulation service (null_probability, p95_drawdown)
+co_agent/sim/dgp.py   synthetic processes with a computable truth
+co_agent/sim/validate.py  bias study + historical walk-forward
+co_agent/data/      price loading for validation studies
 db/                 the Postgres ledger schema
 tests/              pytest suite
 ```
@@ -41,12 +44,26 @@ can, so don't point it at an untrusted conversation.
 ## Tests
 
 ```bash
-pytest                        # 67 tests, no network, no API key needed
+pytest                        # 112 tests, no network, no API key needed
 ./db/test/run_migrations.sh   # schema assertions against a throwaway cluster
 ```
 
 The agent-loop tests run against a fake client, so the suite never spends
 tokens.
+
+## Validating the simulator
+
+`null_probability` is a reference the gate and the calibration report both lean
+on, so it has its own validation. The bias study needs no market data:
+
+```bash
+python -m co_agent.sim.validate                              # fast, Monte Carlo interval
+python -m co_agent.sim.validate --interval double_bootstrap  # the honest interval
+python -m co_agent.sim.validate --prices ./csvs              # historical walk-forward
+```
+
+What it found, and what changed as a result, is in
+[`co_agent/sim/README.md`](co_agent/sim/README.md#validating-the-number).
 
 ## Sub-package documentation
 

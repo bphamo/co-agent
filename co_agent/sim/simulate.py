@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from enum import StrEnum
 
 import numpy as np
 
@@ -20,6 +21,31 @@ from .params import (
     SimInputError,
     sha256_returns,
 )
+
+
+class Interval(StrEnum):
+    """How the interval the gate judges is computed.
+
+    ``MC`` is the Wilson interval on the path count: it describes Monte Carlo
+    error alone. Measured against known truth it covers 4-44% of the time
+    instead of 95%, because Monte Carlo error (~0.018 wide at 10,000 paths) is
+    an order of magnitude smaller than the estimator's real error -- so a gate
+    judging it is confident about the wrong quantity.
+
+    ``DOUBLE_BOOTSTRAP`` resamples the history itself and takes the spread of
+    the resulting estimates. It is 4-7x wider and reaches nominal coverage on
+    IID data (0.96 measured). On state-dependent processes it still under-covers
+    (0.40-0.64), because resampling a history in blocks loses the state that
+    history ended in -- residual specification error no resampling scheme can
+    recover. It is the honest interval available, not a correct one.
+
+    Cost: one evaluation is ``outer_resamples`` extra runs at ``inner_paths``
+    each, about 2-3 seconds. At FR4 volumes that is nothing; in a test suite it
+    is worth passing ``MC``.
+    """
+
+    MC = "mc"
+    DOUBLE_BOOTSTRAP = "double_bootstrap"
 
 
 #: Paths simulated per batch.  Bounds peak memory only -- see :func:`_simulate`
@@ -47,13 +73,30 @@ class Config:
     drift: Drift = Drift.ZERO
     #: Standardise by EWMA volatility and re-inflate at the current forecast,
     #: conditioning the null on today's regime.
-    cond_vol: bool = True
+    #:
+    #: Defaults to False on measured evidence, reversing an earlier assumption.
+    #: Conditioning holds today's volatility flat across the whole horizon, which
+    #: is right while the horizon is short relative to volatility persistence and
+    #: wrong once the process has time to mean-revert. Measured on the synthetic
+    #: panel (see co_agent/sim/README.md), it lowers error at horizons of 5-20
+    #: days and *raises* it at 60-120 -- on GARCH and on regime-switching data
+    #: alike. The TRD's default horizon is 60 days, past the crossover, so the
+    #: default here is off. Turn it on for short-horizon theses.
+    cond_vol: bool = False
     ewma_lambda: float = 0.94
     ewma_warmup: int = 60
     #: Minimum usable observation count.  ~750 is three years of daily data;
     #: open question 6 asks for this number and this is a defensible starting
     #: answer, not a measured one.
     min_history: int = 750
+    #: How the decision interval is computed. See Interval.
+    interval: Interval = Interval.DOUBLE_BOOTSTRAP
+    #: Resampled histories drawn for the double-bootstrap interval. Raising it
+    #: sharpens the *estimate of* the interval, not the interval itself.
+    outer_resamples: int = 24
+    #: Paths per resampled history. The outer spread dominates, so this is
+    #: deliberately smaller than `paths`.
+    inner_paths: int = 2_000
     #: Makes a figure reproducible.  Derive it from the thesis id so that two
     #: theses in one batch do not share a path set.
     seed: int = 1
@@ -69,6 +112,10 @@ class Config:
             raise SimInputError("ewma_warmup must be >= 2")
         if self.min_history <= 0:
             raise SimInputError("min_history must be > 0")
+        if self.outer_resamples < 2:
+            raise SimInputError("outer_resamples must be >= 2")
+        if self.inner_paths <= 0:
+            raise SimInputError("inner_paths must be > 0")
         if self.max_paths < self.paths:
             return replace(self, max_paths=self.paths)
         return self
@@ -113,8 +160,16 @@ class Result:
 
     method: Method
     null_probability: float
+    #: The interval the gate judged. Wide enough to be honest about estimator
+    #: variance under DOUBLE_BOOTSTRAP; Monte Carlo error only under MC.
     ci_low: float
     ci_high: float
+    #: Monte Carlo error alone, always reported. Useful for telling "I drew too
+    #: few paths" apart from "this history cannot pin the number down", which are
+    #: different problems with different fixes.
+    mc_ci_low: float
+    mc_ci_high: float
+    interval: Interval
     verdict: Verdict
     paths: int
     escalations: int
@@ -191,14 +246,31 @@ def run(request: Request) -> Result:
                 # leaving prior.n = 0 in sim_params as the flag that this
                 # verdict rests on judgement.
                 ci_low = ci_high = p
+            mc_low, mc_high = ci_low, ci_high
             verdict = band.judge(p, ci_low, ci_high)
             break
 
         p = trips / paths
-        ci_low, ci_high = wilson(trips, paths)
+        mc_low, mc_high = wilson(trips, paths)
+
+        if cfg.interval is Interval.DOUBLE_BOOTSTRAP:
+            ci_low, ci_high = _double_bootstrap_interval(
+                returns, request.falsifier, request.horizon_days, cfg
+            )
+        else:
+            ci_low, ci_high = mc_low, mc_high
+
         verdict = band.judge(p, ci_low, ci_high)
 
-        if verdict is not Verdict.INDETERMINATE or paths >= cfg.max_paths:
+        # Escalating the path count narrows Monte Carlo error, which is not what
+        # a double-bootstrap interval is made of: its width is a property of the
+        # history, so more paths cannot resolve an indeterminate verdict. Under
+        # MC the escalation is meaningful, so it is kept there and only there.
+        if (
+            cfg.interval is not Interval.MC
+            or verdict is not Verdict.INDETERMINATE
+            or paths >= cfg.max_paths
+        ):
             break
         paths = min(paths * 4, cfg.max_paths)
         escalations += 1
@@ -220,6 +292,10 @@ def run(request: Request) -> Result:
         history_sha256=sha256_returns(returns),
         seed=cfg.seed,
         gate_band=(band.low, band.high),
+        interval_method=str(cfg.interval),
+        outer_resamples=(
+            cfg.outer_resamples if cfg.interval is Interval.DOUBLE_BOOTSTRAP else None
+        ),
         ewma_lambda=cfg.ewma_lambda if cfg.cond_vol else None,
         ewma_warmup=cfg.ewma_warmup if cfg.cond_vol else None,
         sigma_current=pool.sigma_current,
@@ -235,6 +311,9 @@ def run(request: Request) -> Result:
         null_probability=p,
         ci_low=ci_low,
         ci_high=ci_high,
+        mc_ci_low=mc_low,
+        mc_ci_high=mc_high,
+        interval=cfg.interval,
         verdict=verdict,
         paths=paths,
         escalations=escalations,
@@ -277,3 +356,55 @@ def _simulate(
         drawdowns[done : done + n] = max_drawdown(levels)
         done += n
     return trips, drawdowns
+
+
+def _double_bootstrap_interval(
+    returns: np.ndarray,
+    falsifier: Falsifier,
+    horizon: int,
+    cfg: Config,
+) -> tuple[float, float]:
+    """Spread of the estimate across resampled histories.
+
+    The outer resample is itself a stationary bootstrap of the raw return series,
+    so dependence survives into each replicate; the pool is then rebuilt from
+    scratch per replicate, which means any volatility conditioning is re-estimated
+    too and its sampling error is included rather than assumed away.
+
+    What this captures: "how far would this number move had I seen a different
+    sample of the same process". What it cannot capture: the state the real
+    history ended in, which block resampling scrambles -- so on state-dependent
+    data the interval is still too narrow. Measured coverage is 0.96 on IID data
+    and 0.40-0.64 on GARCH and regime-switching data.
+    """
+    rng = np.random.default_rng([cfg.seed, 0xD00D])
+    jump_prob = min(1.0, 1.0 / cfg.mean_block_len)
+    estimates = np.empty(cfg.outer_resamples)
+
+    for j in range(cfg.outer_resamples):
+        replicate = bootstrap_draws(
+            rng, returns, 1.0, jump_prob, returns.size, 1
+        )[0]
+        try:
+            pool = build_pool(
+                replicate,
+                cond_vol=cfg.cond_vol,
+                drift_zero=cfg.drift is Drift.ZERO,
+                ewma_lambda=cfg.ewma_lambda,
+                ewma_warmup=cfg.ewma_warmup,
+                min_history=cfg.min_history,
+            )
+        except (SimInputError, InsufficientHistoryError):
+            estimates[j] = np.nan
+            continue
+        inner = replace(cfg, paths=cfg.inner_paths, seed=cfg.seed + j)
+        trips, _ = _simulate(pool, falsifier, horizon, cfg.inner_paths, inner)
+        estimates[j] = trips / cfg.inner_paths
+
+    usable = estimates[np.isfinite(estimates)]
+    if usable.size < 2:
+        # Not enough replicates to say anything about spread. Returning the
+        # widest possible interval makes the verdict indeterminate rather than
+        # confidently wrong.
+        return 0.0, 1.0
+    return float(np.quantile(usable, 0.025)), float(np.quantile(usable, 0.975))

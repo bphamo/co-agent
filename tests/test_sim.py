@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 import co_agent.sim as sim
+from co_agent.sim.simulate import Interval
 
 
 def synth_returns(n: int, vol: float, seed: int) -> np.ndarray:
@@ -39,6 +40,10 @@ def base_request(falsifier: sim.Falsifier | None = None, **kwargs) -> sim.Reques
         falsifier=falsifier,
         proposed_weight=0.05,
         per_position_drawdown_limit=0.02,
+        # MC unless a test is about interval width: the double bootstrap runs
+        # `outer_resamples` extra simulations, which is right in production and
+        # 25x too slow for a unit test.
+        config=sim.Config(interval=Interval.MC),
     )
     params.update(kwargs)
     return sim.Request(**params)
@@ -54,13 +59,13 @@ def test_run_is_deterministic():
     assert a.params.version == sim.VERSION
 
     # A different seed must move the figure, or the seed is not being used.
-    c = sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(seed=99)))
+    c = sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(seed=99, interval=Interval.MC)))
     assert c.null_probability != a.null_probability
 
 
 def test_demeaned_pool_ends_above_half_the_time():
     """The one analytic anchor available without a closed form for the rest."""
-    res = sim.run(base_request(sim.TerminalAbove(0.0), config=sim.Config(paths=20_000)))
+    res = sim.run(base_request(sim.TerminalAbove(0.0), config=sim.Config(paths=20_000, interval=Interval.MC)))
     assert abs(res.null_probability - 0.5) < 0.03
 
 
@@ -93,7 +98,7 @@ def test_conditioning_needs_history_beyond_the_warmup():
     req = base_request(
         sim.TouchBelow(0.12),
         history=history(n=800),
-        config=sim.Config(min_history=760, ewma_warmup=60),
+        config=sim.Config(min_history=760, ewma_warmup=60, cond_vol=True),
     )
     with pytest.raises(sim.InsufficientHistoryError) as excinfo:
         sim.run(req)
@@ -177,7 +182,7 @@ def test_indeterminate_escalates_the_path_count():
     req = base_request(
         sim.TouchBelow(0.12),
         band=sim.Band(low=first.null_probability, high=first.null_probability + 0.25),
-        config=sim.Config(max_paths=160_000),
+        config=sim.Config(max_paths=160_000, interval=Interval.MC),
     )
     res = sim.run(req)
     assert res.escalations > 0
@@ -194,7 +199,7 @@ def test_boundary_holds_indeterminate_rather_than_guessing():
     req = base_request(
         sim.TouchBelow(0.12),
         band=sim.Band(low=p - 0.0005, high=p + 0.0005),
-        config=sim.Config(paths=10_000, max_paths=10_000),
+        config=sim.Config(paths=10_000, max_paths=10_000, interval=Interval.MC),
     )
     res = sim.run(req)
     assert res.verdict is sim.Verdict.INDETERMINATE
@@ -213,7 +218,7 @@ def test_conditioning_on_current_vol_moves_the_null():
         req = base_request(
             sim.TouchBelow(0.15),
             history=sim.History("T", 1, returns),
-            config=sim.Config(cond_vol=cond_vol),
+            config=sim.Config(cond_vol=cond_vol, interval=Interval.MC),
         )
         return sim.run(req).null_probability
 
@@ -229,11 +234,11 @@ def test_conditioning_on_current_vol_moves_the_null():
 def test_batching_handles_a_path_count_above_one_batch():
     """A 40,000-path escalation spans batches; the estimate must stay sane."""
     small = sim.run(base_request(sim.TouchBelow(0.12)))
-    large = sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(paths=40_000)))
+    large = sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(paths=40_000, interval=Interval.MC)))
     assert large.paths == 40_000
     assert abs(large.null_probability - small.null_probability) < 0.03
     # Same (seed, paths) is reproducible even across batch boundaries.
-    again = sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(paths=40_000)))
+    again = sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(paths=40_000, interval=Interval.MC)))
     assert again.null_probability == large.null_probability
 
 
@@ -276,3 +281,98 @@ def test_result_carries_no_synthetic_paths():
     res = sim.run(base_request(sim.TouchBelow(0.12)))
     for f in dataclasses.fields(res):
         assert not isinstance(getattr(res, f.name), np.ndarray)
+
+
+# --------------------------------------------------------- interval and defaults
+
+
+def test_cond_vol_is_off_by_default():
+    """Measured on the synthetic panel: conditioning raises error at 60 days."""
+    assert sim.Config().cond_vol is False
+
+
+def test_double_bootstrap_is_the_default_interval():
+    assert sim.Config().interval is Interval.DOUBLE_BOOTSTRAP
+
+
+def test_double_bootstrap_is_much_wider_than_monte_carlo_error():
+    """The two intervals answer different questions, and the gap is the point.
+
+    Monte Carlo error says how much the estimate would move on a different seed.
+    The double bootstrap says how much it would move on a different sample of the
+    same process -- which is 3-7x larger, and is what the gate should be judging.
+    """
+    req = base_request(sim.TouchBelow(0.12), config=sim.Config(outer_resamples=12))
+    res = sim.run(req)
+    assert res.interval is Interval.DOUBLE_BOOTSTRAP
+    mc_width = res.mc_ci_high - res.mc_ci_low
+    width = res.ci_high - res.ci_low
+    assert width > 2 * mc_width, f"{width=} {mc_width=}"
+    # The Monte Carlo interval is still reported, so "too few paths" stays
+    # distinguishable from "this history cannot pin the number down".
+    assert 0 < mc_width < 0.05
+
+
+def test_monte_carlo_interval_is_reported_under_both_methods():
+    for interval in (Interval.MC, Interval.DOUBLE_BOOTSTRAP):
+        res = sim.run(
+            base_request(
+                sim.TouchBelow(0.12),
+                config=sim.Config(interval=interval, outer_resamples=8),
+            )
+        )
+        assert res.mc_ci_low < res.null_probability < res.mc_ci_high
+
+
+def test_escalation_only_applies_to_the_monte_carlo_interval():
+    """More paths narrow Monte Carlo error and nothing else.
+
+    A double-bootstrap width is a property of the history, so escalating the
+    path count cannot resolve an indeterminate verdict -- and a loop that tried
+    would burn four times the compute to return the same answer.
+    """
+    first = sim.run(base_request(sim.TouchBelow(0.12)))
+    boundary = sim.Band(low=first.null_probability, high=first.null_probability + 0.25)
+
+    mc = sim.run(
+        base_request(
+            sim.TouchBelow(0.12),
+            band=boundary,
+            config=sim.Config(interval=Interval.MC, max_paths=160_000),
+        )
+    )
+    assert mc.escalations > 0
+
+    db = sim.run(
+        base_request(
+            sim.TouchBelow(0.12),
+            band=boundary,
+            config=sim.Config(
+                interval=Interval.DOUBLE_BOOTSTRAP, outer_resamples=8, max_paths=160_000
+            ),
+        )
+    )
+    assert db.escalations == 0
+    assert db.paths == sim.Config().paths
+
+
+def test_interval_method_is_recorded_for_reproducibility():
+    """A stored verdict depends on which interval produced it."""
+    res = sim.run(
+        base_request(sim.TouchBelow(0.12), config=sim.Config(outer_resamples=8))
+    )
+    params = res.params.to_dict()
+    assert params["interval_method"] == "double_bootstrap"
+    assert params["outer_resamples"] == 8
+    assert params["version"] == "sim/2"
+
+    mc = sim.run(base_request(sim.TouchBelow(0.12)))
+    assert mc.params.to_dict()["interval_method"] == "mc"
+    assert "outer_resamples" not in mc.params.to_dict()
+
+
+def test_outer_resamples_is_validated():
+    with pytest.raises(sim.SimInputError):
+        sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(outer_resamples=1)))
+    with pytest.raises(sim.SimInputError):
+        sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(inner_paths=0)))
