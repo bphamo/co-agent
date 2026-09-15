@@ -44,9 +44,21 @@ def _check_non_negative(name: str, value: float) -> None:
 
 @dataclass(frozen=True, slots=True)
 class TouchBelow:
-    """Trips if the level falls ``drop`` below the start at any point.
+    """Trips if a daily close falls ``drop`` below the start, on any day.
 
     ``drop`` is a positive fraction: 0.12 means "down 12%".
+
+    **This is not an intraday touch.** Synthetic paths are close-to-close, so
+    "any point" means any daily close, not any trade. A live thesis worded
+    "trades 12% below" and resolved against intraday lows will trip more often
+    than this null predicts, because a daily range straddles its close --
+    ``null_probability`` would be biased low, the gate would misjudge it, and
+    FR7's calibration net of it would be wrong in the flattering direction.
+
+    Two ways to keep the null and the resolver in agreement: word falsifiers
+    against closes, or feed the simulator OHLC bars and model the daily low.
+    Whichever is chosen, the resolver must use the same definition -- the
+    mismatch is silent.
     """
 
     drop: float
@@ -67,7 +79,10 @@ class TouchBelow:
 
 @dataclass(frozen=True, slots=True)
 class TouchAbove:
-    """Trips if the level rises ``rise`` above the start at any point."""
+    """Trips if a daily close rises ``rise`` above the start, on any day.
+
+    Close-based, not an intraday touch -- see :class:`TouchBelow`.
+    """
 
     rise: float
 
@@ -87,11 +102,11 @@ class TouchAbove:
 
 @dataclass(frozen=True, slots=True)
 class TerminalBelow:
-    """Trips on the horizon date only.
+    """Trips on the closing price of the horizon date only.
 
-    "Closes below" rather than "trades below" -- a materially different and
-    usually much harder falsifier, which is exactly the kind of difference
-    ``null_probability`` exists to expose.
+    Closing *on* the date rather than closing below it at any point during the
+    horizon -- a materially different and usually much harder falsifier, which is
+    exactly the kind of difference ``null_probability`` exists to expose.
     """
 
     drop: float

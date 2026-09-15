@@ -15,7 +15,7 @@ import co_agent.sim as sim
 res = sim.run(sim.Request(
     history=sim.History("FAKE.TO", 9876, log_returns),  # daily, oldest first
     horizon_days=60,
-    falsifier=sim.TouchBelow(drop=0.12),                # "trades 12% below entry"
+    falsifier=sim.TouchBelow(drop=0.12),                # closes 12% down on any day
     proposed_weight=0.05,
     per_position_drawdown_limit=0.02,
 ))
@@ -29,6 +29,15 @@ res.params.to_json()       # -> theses.sim_params
 
 Falsifiers: `TouchBelow`, `TouchAbove`, `TerminalBelow`, `TerminalAbove`,
 `DrawdownExceeds`. Pass a `Prior` instead for the event class.
+
+**All of them are evaluated on daily closes**, because synthetic paths are
+close-to-close. `TouchBelow` means "closes 12% down on at least one day", not
+"trades 12% down" — despite the name, which is worth changing. A live thesis
+resolved against intraday lows would trip more often than this null predicts, so
+the falsifier wording and the resolver have to share one definition or
+`null_probability` is biased low and nothing downstream notices. Deciding to
+resolve on intraday lows means feeding the simulator OHLC bars and modelling the
+daily range; resolving on closes needs only a close series.
 
 ## Where this departs from the TRD, and why
 

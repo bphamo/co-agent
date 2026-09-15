@@ -376,3 +376,20 @@ def test_outer_resamples_is_validated():
         sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(outer_resamples=1)))
     with pytest.raises(sim.SimInputError):
         sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(inner_paths=0)))
+
+
+def test_touch_falsifiers_are_close_based_not_intraday():
+    """Pins the semantics the name obscures.
+
+    A path whose closes never breach the threshold does not trip, even though a
+    real day with that close could easily have traded through it intraday. The
+    resolver must use the same definition or the null is biased low.
+    """
+    # Closes bottom out at -11%: an 12% close-based falsifier does not trip.
+    closes = np.array([[1.0, 0.95, 0.89, 0.93, 1.01]])
+    assert not sim.TouchBelow(0.12).trips(closes)[0]
+    # A single interior close through the threshold is enough.
+    closes = np.array([[1.0, 0.95, 0.87, 0.93, 1.01]])
+    assert sim.TouchBelow(0.12).trips(closes)[0]
+    # Terminal falsifiers ignore the interior entirely.
+    assert not sim.TerminalBelow(0.12).trips(closes)[0]
