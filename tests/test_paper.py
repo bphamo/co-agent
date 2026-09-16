@@ -103,3 +103,58 @@ def test_fees_and_slippage_are_reported_separately():
     b.sell("X.TO", DAY, 100.0)
     assert b.total_fees == pytest.approx(9.9)
     assert b.slippage_cost > 0
+
+
+# ----------------------------------------------------- long-only, cash-only
+#
+# The instrument set is a deliberate constraint, not an unfinished feature:
+# long equity, bought with settled cash, sold only from what is held. These
+# pin it as a property of the broker rather than of the caller's good manners,
+# because every way of breaking it -- a short, a margin buy, an option -- turns
+# a bounded loss into an unbounded one, and none of the sizing above (p95
+# drawdown, the weight reduction) is computed for a payoff that can go past
+# -100%.
+
+
+def test_a_position_can_never_go_short():
+    """Selling more than is held sells what is held, and no more."""
+    b = PaperBroker(cash=10_000, slippage_bps=0)
+    b.buy("X.TO", DAY, 100.0, 1_000)
+    held = b.positions["X.TO"].qty
+
+    fill = b.sell("X.TO", DAY, 100.0, qty=held * 10)
+    assert fill is not None and fill.qty == held
+    assert "X.TO" not in b.positions
+
+    # And a further sale opens nothing.
+    assert b.sell("X.TO", DAY, 100.0, qty=50) is None
+    assert b.positions == {}
+
+
+def test_selling_an_unheld_symbol_opens_no_position():
+    b = PaperBroker(cash=10_000)
+    assert b.sell("NEVER-OWNED.TO", DAY, 100.0, qty=100) is None
+    assert b.positions == {}
+    assert b.cash == 10_000
+
+
+def test_cash_is_never_negative_however_the_orders_are_sequenced():
+    """No margin: the account cannot spend money it does not have."""
+    b = PaperBroker(cash=1_000, slippage_bps=0)
+    for symbol in ("A.TO", "B.TO", "C.TO", "D.TO"):
+        try:
+            b.buy(symbol, DAY, 100.0, 900)
+        except InsufficientCash:
+            pass
+        assert b.cash >= 0, f"{symbol} drove cash negative"
+
+
+def test_every_fill_is_a_buy_or_a_sell_of_whole_shares():
+    """The only two order types there are. A new one is a design decision."""
+    b = PaperBroker(cash=10_000, slippage_bps=0)
+    b.buy("X.TO", DAY, 100.0, 5_000)
+    b.sell("X.TO", DAY, 110.0)
+
+    assert [f.side for f in b.fills] == ["buy", "sell"]
+    for f in b.fills:
+        assert f.qty == int(f.qty) and f.qty > 0

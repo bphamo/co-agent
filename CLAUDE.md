@@ -27,6 +27,29 @@ Recording that honestly is the point of the ledger. This package has
 demonstrated cost control and volatility-aware sizing, and nothing yet that
 beats owning the universe.
 
+## Instruments: long equity only, bought and sold with settled cash
+
+**Buy and sell. No options, no shorts, no margin, no leverage, no derivatives
+of any kind.** This is a fixed constraint on the system, not a feature that has
+not been built yet. Adding an instrument is a decision for the owner of the
+account, never an implementation detail of a change that is chasing the gap.
+
+The broker enforces it structurally rather than by convention, and
+`tests/test_paper.py` pins it: `sell` only ever sells what is held and opens
+nothing when the position is absent, so a position cannot go short; `buy` is
+bounded by settled cash and raises `InsufficientCash` rather than borrowing.
+
+The reason is that everything downstream assumes a bounded loss. `p95_drawdown`
+is a per-position number computed from price paths, the weight reduction sizes
+against it, and both are meaningless for a payoff that can pass -100%. A short
+or a written option turns the worst case from "the position goes to zero" into
+"the position is unbounded", and nothing in the sizing path would notice.
+
+That matters most precisely because the goal above is stated in money. Leverage
+is the fastest way to move a return number without any edge behind it, and it
+would move the reported gap while making the system strictly worse. If an arm
+only beats buy and hold with leverage, it has not beaten buy and hold.
+
 ## What the goal does not license
 
 A money goal plus a fast feedback number is how a research system turns into an
