@@ -43,4 +43,4 @@ build/
 dist/
 
 # fetched market data (not redistributed)
-data/
+/data/
