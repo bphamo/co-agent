@@ -25,6 +25,8 @@ that weight.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import date
+from typing import Sequence
 
 import numpy as np
 
@@ -222,6 +224,10 @@ class Observation:
     origin: int
     predicted: float
     tripped: bool
+    #: Calendar date of the origin, when the caller supplied one. Without it
+    #: observations cannot be grouped across symbols -- `origin` is an index into
+    #: one symbol's own series, and two symbols' index 1600 are different days.
+    origin_date: date | None = None
 
 
 def non_overlapping_origins(n_obs: int, history_obs: int, horizon: int) -> list[int]:
@@ -246,6 +252,7 @@ def walk_forward(
     history_obs: int = 1600,
     config: Config | None = None,
     overlapping: bool = False,
+    dates: Sequence[date] | None = None,
 ) -> list[Observation]:
     """Predict at each origin using only prior data, then observe the outcome.
 
@@ -286,6 +293,9 @@ def walk_forward(
                 origin=origin,
                 predicted=result.null_probability,
                 tripped=bool(falsifier.trips(realised)[0]),
+                # `dates` indexes closes; returns are one shorter, so return i
+                # ends on close i+1.
+                origin_date=dates[origin + 1] if dates is not None else None,
             )
         )
     return out
@@ -302,6 +312,19 @@ class Bin:
     realised: float
     ci_low: float
     ci_high: float
+    #: True when the interval came from the clustered bootstrap.
+    clustered: bool = False
+
+
+def _clusters(members: list[Observation]) -> list[list[Observation]] | None:
+    """Group observations into calendar quarters, or None if dates are missing."""
+    if any(o.origin_date is None for o in members):
+        return None
+    buckets: dict[tuple[int, int], list[Observation]] = {}
+    for o in members:
+        assert o.origin_date is not None
+        buckets.setdefault((o.origin_date.year, (o.origin_date.month - 1) // 3), []).append(o)
+    return list(buckets.values())
 
 
 def reliability(
@@ -312,14 +335,19 @@ def reliability(
 ) -> list[Bin]:
     """Predicted probability against realised frequency, by bin.
 
-    The interval on the realised frequency comes from a bootstrap over
-    observations rather than a binomial formula, because walk-forward outcomes
-    across symbols are cross-correlated -- a market-wide drawdown trips many at
-    once -- and a binomial interval would claim precision the sample does not
-    have.  With one symbol it reduces to roughly the binomial answer.
+    The interval on the realised frequency comes from a bootstrap that resamples
+    **calendar quarters**, not individual observations. Walk-forward outcomes are
+    cross-correlated -- a market-wide drawdown trips many symbols in the same
+    window -- so resampling observations independently would treat 48 symbols in
+    one quarter as 48 independent trials and report an interval several times too
+    narrow. Clustering by quarter keeps co-movement inside the resampling unit.
 
-    Every row carries ``n``: FR7 requires a sample size beside every figure, and
-    a reliability table is the easiest place to forget it.
+    When observations carry no ``origin_date`` the clustered bootstrap is not
+    available and it falls back to resampling observations, which is right for a
+    single symbol and optimistic for several. ``Bin.clustered`` records which ran.
+
+    Every row carries ``n``: FR7 requires a sample size beside every figure, and a
+    reliability table is the easiest place to forget it.
     """
     rng = np.random.default_rng(rng_seed)
     rows: list[Bin] = []
@@ -332,12 +360,23 @@ def reliability(
 
         members = [o for o in observations if in_bin(o.predicted)]
         if not members:
-            rows.append(Bin(low, high, 0, float("nan"), float("nan"), float("nan"), float("nan")))
+            rows.append(
+                Bin(low, high, 0, float("nan"), float("nan"), float("nan"), float("nan"), False)
+            )
             continue
 
         outcomes = np.array([o.tripped for o in members], dtype=float)
-        draws = rng.integers(0, outcomes.size, size=(boot, outcomes.size))
-        means = outcomes[draws].mean(axis=1)
+        groups = _clusters(members)
+        if groups is None:
+            draws = rng.integers(0, outcomes.size, size=(boot, outcomes.size))
+            means = outcomes[draws].mean(axis=1)
+        else:
+            pooled = [np.array([o.tripped for o in g], dtype=float) for g in groups]
+            idx = rng.integers(0, len(pooled), size=(boot, len(pooled)))
+            means = np.array(
+                [np.concatenate([pooled[i] for i in row]).mean() for row in idx]
+            )
+
         rows.append(
             Bin(
                 low=low,
@@ -347,9 +386,11 @@ def reliability(
                 realised=float(outcomes.mean()),
                 ci_low=float(np.quantile(means, 0.025)),
                 ci_high=float(np.quantile(means, 0.975)),
+                clustered=groups is not None,
             )
         )
     return rows
+
 
 
 # ------------------------------------------------------------------ reporting
@@ -389,7 +430,7 @@ def format_reliability(rows: list[Bin]) -> str:
         if r.n == 0:
             lines.append(f"{label:>18}{0:>6}{'-':>11}{'-':>10}{'-':>18}")
             continue
-        ci = f"[{r.ci_low:.3f}, {r.ci_high:.3f}]"
+        ci = f"[{r.ci_low:.3f}, {r.ci_high:.3f}]" + ("" if r.clustered else " *")
         lines.append(
             f"{label:>18}{r.n:>6}{r.mean_predicted:>11.3f}{r.realised:>10.3f}{ci:>18}"
         )
@@ -428,15 +469,24 @@ def main(argv: list[str] | None = None) -> int:
         help="MC is fast; double_bootstrap is the honest width and ~25x slower",
     )
     parser.add_argument("--cond-vol", action="store_true", help="condition on current volatility")
+    parser.add_argument(
+        "--drift",
+        choices=["zero", "historical"],
+        default="zero",
+        help="zero demeans the pool; historical keeps the symbol's realised drift",
+    )
     parser.add_argument("--prices", type=str, default=None, help="run the walk-forward instead")
     parser.add_argument("--seed", type=int, default=12345)
     args = parser.parse_args(argv)
 
     falsifier = __import__("co_agent.sim", fromlist=["TouchBelow"]).TouchBelow(args.drop)
+    from .params import Drift
+
     cfg = Config(
         paths=args.paths,
         interval=Interval(args.interval),
         cond_vol=args.cond_vol,
+        drift=Drift(args.drift),
         seed=args.seed,
     )
     band = Band()
@@ -447,7 +497,7 @@ def main(argv: list[str] | None = None) -> int:
         series = load_dir(args.prices, min_obs=args.history + args.horizon + 1)
         print(
             f"walk-forward: {len(series)} symbols, horizon {args.horizon}d, "
-            f"non-overlapping windows, interval={args.interval}"
+            f"non-overlapping windows, drift={args.drift}, cond_vol={args.cond_vol}"
         )
         observations: list[Observation] = []
         for symbol, px in sorted(series.items()):
@@ -461,12 +511,14 @@ def main(argv: list[str] | None = None) -> int:
                 horizon_days=args.horizon,
                 history_obs=args.history,
                 config=cfg,
+                dates=px.dates,
             )
         print(f"  {len(observations)} observations\n")
         print(format_reliability(reliability(observations)))
         print(
-            "\nNote: windows do not overlap, but symbols do move together, so the "
-            "\nintervals above are bootstrapped over observations rather than binomial."
+            "\nIntervals resample calendar quarters, so co-movement across symbols stays"
+            "\ninside the resampling unit ('*' marks a row that fell back to resampling"
+            "\nobservations, which is optimistic for several symbols)."
             "\nA universe assembled today also excludes what was delisted, which biases"
             "\nrealised tail frequencies down."
         )

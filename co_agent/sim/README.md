@@ -216,6 +216,48 @@ Neither part substitutes for the other. A process that flatters the estimator an
 history that does not means the panel is too kind; passing on the panel and
 failing on history localises the problem to a property the panel omits.
 
+### First run on real data (TSX, 48 names, 4,119 observations)
+
+48 liquid TSX names, histories from 1986–2015 starts to 2026-09, non-overlapping
+60-day windows, `TouchBelow(0.12)`, 1,600-observation history per origin.
+Predicted probability against what actually happened:
+
+| predicted | n | mean pred | realised | 95% CI | |
+|---|---|---|---|---|---|
+| **zero drift** (current default) | | | | | |
+| [0.0, 0.2) | 1622 | 0.126 | 0.103 | [0.069, 0.144] | ok |
+| [0.2, 0.4) | 1637 | 0.277 | 0.164 | [0.133, 0.197] | **overstates** |
+| [0.4, 0.6) | 817 | 0.490 | 0.400 | [0.352, 0.447] | **overstates** |
+| [0.6, 0.8) | 43 | 0.630 | 0.535 | [0.390, 0.691] | ok (thin) |
+| **historical drift** | | | | | |
+| [0.0, 0.2) | 2315 | 0.108 | 0.113 | [0.084, 0.145] | ok |
+| [0.2, 0.4) | 1120 | 0.281 | 0.210 | [0.166, 0.255] | overstates |
+| [0.4, 0.6) | 607 | 0.488 | 0.422 | [0.368, 0.477] | ok |
+| [0.6, 0.8) | 77 | 0.624 | 0.429 | [0.316, 0.570] | overstates (thin) |
+
+**The zero-drift null overstates downside falsifiers, and the symbol's own drift
+closes most of the gap.** The reason is not subtle once seen: equities have a
+positive expected return, so stripping drift does not produce "no information
+about direction" -- it produces an actively wrong counterfactual, in which the
+stock is more likely to fall 12% than it really is. `Drift.ZERO` remains the
+default because what "by chance" should mean is a modelling decision about the
+ledger's reference point rather than a bug, but the measurement favours
+including drift.
+
+Before flipping it, two things are worth testing, because `Drift.HISTORICAL`
+estimates drift from 1,600 days of one name and therefore extrapolates momentum:
+whether aggregate calibration improves at the cost of high-drift names
+individually, and whether shrinking the symbol's drift toward a market or sector
+baseline beats both. The middle bin still overstates by 0.07 with drift included,
+so drift is not the whole story either.
+
+**What this result cannot settle.** The universe was assembled today, so
+delisted names are missing and realised trip frequencies are biased *down* --
+the same direction as the estimator's apparent overstatement. The two are
+confounded, and no amount of extra symbols fixes it; only a point-in-time
+constituent list would. The *comparison* between drift settings is unaffected,
+since both share the bias.
+
 **Still to run:** the falsifier-threshold sweep above covers one process and one
 falsifier family. The same sweep across `TerminalBelow` and `DrawdownExceeds`, and
 across horizon buckets, would say whether some falsifier *shapes* are

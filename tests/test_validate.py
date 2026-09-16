@@ -222,3 +222,54 @@ def test_a_perfectly_calibrated_and_a_broken_forecaster_are_distinguishable():
     b = next(r for r in reliability(broken, boot=1000) if r.n)
     assert abs(c.realised - c.mean_predicted) < 0.05
     assert abs(b.realised - b.mean_predicted) > 0.5
+
+
+def _dated_obs(pred, tripped, n, year, quarter_month):
+    from datetime import date as _d
+
+    return [
+        Observation("S%d" % i, 0, pred, tripped, origin_date=_d(year, quarter_month, 15))
+        for i in range(n)
+    ]
+
+
+def test_clustered_bootstrap_is_wider_than_resampling_observations():
+    """The correction that matters on a multi-symbol study.
+
+    Forty-eight symbols in one quarter that all tripped together are one event,
+    not forty-eight trials. Resampling observations independently would report an
+    interval several times too narrow; resampling quarters keeps the co-movement
+    inside the unit.
+    """
+    # Four quarters, each internally unanimous: within-quarter outcomes are
+    # perfectly correlated, which is the case i.i.d. resampling gets wrong.
+    dated: list[Observation] = []
+    for i, (year, month, tripped) in enumerate(
+        [(2020, 1, True), (2020, 4, False), (2020, 7, True), (2020, 10, False)]
+    ):
+        dated += _dated_obs(0.5, tripped, 25, year, month)
+
+    undated = [Observation(o.symbol, o.origin, o.predicted, o.tripped) for o in dated]
+
+    clustered = next(r for r in reliability(dated, boot=3000) if r.n)
+    naive = next(r for r in reliability(undated, boot=3000) if r.n)
+
+    assert clustered.clustered is True
+    assert naive.clustered is False
+    assert clustered.realised == naive.realised == pytest.approx(0.5)
+    assert (clustered.ci_high - clustered.ci_low) > 3 * (naive.ci_high - naive.ci_low)
+
+
+def test_walk_forward_records_origin_dates_when_given_them():
+    from datetime import date as _d
+
+    rng = np.random.default_rng(11)
+    series = rng.normal(0, 0.02, 1000)
+    dates = [_d(2020, 1, 1) + __import__("datetime").timedelta(days=i) for i in range(1001)]
+    obs = walk_forward(
+        "X", series, TouchBelow(0.12), horizon_days=60, history_obs=800,
+        config=MC, dates=dates,
+    )
+    assert obs and all(o.origin_date is not None for o in obs)
+    # The origin date is the day the history ends, not the day it starts.
+    assert obs[0].origin_date == dates[801]

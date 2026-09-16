@@ -41,3 +41,6 @@ venv/
 *.egg-info/
 build/
 dist/
+
+# fetched market data (not redistributed)
+data/
