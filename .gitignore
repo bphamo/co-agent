@@ -44,3 +44,6 @@ dist/
 
 # fetched market data (not redistributed)
 /data/
+
+# stray artefacts from scratchpad scripts run with the repo as cwd
+/*.npy
