@@ -49,14 +49,77 @@ On a $10,000 account, measured across an up year and a down year:
 | *equal-weight buy & hold* | *+26.3%* | *+5.0%* | *~$240* | *48* |
 
 Weekly trading costs **18% of capital per year**. Monthly costs 4%. That part is
-arithmetic and not in doubt. Whether the monthly *returns* hold up is two data
-points, and a rolling test across every overlapping 12-month window since 2002 is
-what settles it — until it reports, the cadence is not a default.
+arithmetic and not in doubt. Whether the monthly *returns* hold up was two data
+points. The rolling test below has now reported, and they do not hold up — they
+were never there. Monthly is the default on cost alone.
 
 Note that buy-and-hold beat every active variant in the up year. Nothing in this
 package has demonstrated directional edge; the negative control showed the
 simulator's score contains none by construction. What is demonstrated is cost
 control and volatility-aware sizing.
+
+## The rolling test: cadence does not move returns, and both arms lose to holding
+
+95 overlapping 12-month windows, 2002-01-08 to 2026-06-29, 48 TSX names, horizon
+held at the screen's 20 days across both cadences so that only the cycle calendar
+varies. Reproduce with `python -m co_agent.cycle.cadence`; the raw rows are in
+`studies/cadence-2026-09-16.jsonl` and the table below is
+`--report` over them.
+
+| arm | median | mean | p10 | p90 | >0 | fills | fees |
+|---|---|---|---|---|---|---|---|
+| weekly, hold to horizon | 0.7% | 0.8% | −16.0% | 21.4% | 52% | 195 | $970 |
+| monthly, hold to horizon | 0.1% | 1.0% | −12.1% | 14.3% | 51% | 140 | $697 |
+| weekly, falsifier exit | −8.5% | −8.1% | −22.7% | 5.5% | 26% | 272 | $1,351 |
+| *equal-weight buy & hold* | *13.9%* | *15.1%* | *−3.0%* | *29.7%* | *86%* | *43* | *$213* |
+
+**These fills and fees are not the ones in the table above, and should not be
+read against them.** That table's monthly arm shows 62 fills and $367 a year;
+this one shows 140 and $697. The difference is horizon, not a contradiction: this
+study holds the horizon at 20 days for *both* cadences so that the cycle calendar
+is the only thing that varies, which leaves a monthly arm carrying overlapping
+positions the earlier run did not. The cost *ordering* is the same and the
+18%-vs-4% arithmetic above is unaffected; the absolute cost ratio here is
+compressed by that design choice. The return columns are what this study is for.
+
+Head to head, per window:
+
+| | wins | mean difference |
+|---|---|---|
+| monthly vs weekly | 51/95 (54%) | +0.20% [−1.28%, +1.64%] |
+| weekly vs falsifier-exit | 85/95 (89%) | +8.90% [+7.35%, +10.52%] |
+| monthly vs buy & hold | 10/95 (11%) | −14.11% [−16.88%, −11.49%] |
+| weekly vs buy & hold | 7/95 (7%) | −14.31% [−17.22%, −11.60%] |
+
+Three findings, in increasing order of how much they should change behaviour.
+
+**Cadence does not move returns.** A dead heat on win rate, means within 0.2
+points, and a paired interval straddling zero. The earlier two-point result that
+looked like monthly *earning* more (+10.7%/+9.5% against +20.5%/−4.6%) was two
+draws from this distribution and nothing else. Monthly still becomes the default,
+but on the cost argument alone: same return, fewer fills, lower fees. This
+removes a claim rather than confirming one.
+
+**The falsifier must not be the exit.** Already the finding from 43 sessions;
+across 24 years it is emphatic. Profitable in 26% of windows, beaten by
+hold-to-horizon in 89% of them by nearly 9 points.
+
+**Buy and hold beats every active arm.** Not an up-year artifact — 86% of windows
+profitable against roughly 51%, a p10 of −3.0% against −12% to −16%, and about 14
+points a year of difference. The README previously noted this for one up year;
+it is the entire sample. Nothing in this package has demonstrated directional
+edge, the negative control showed the simulator's score contains none by
+construction, and this puts a number on what trying costs.
+
+What is demonstrated remains cost control and volatility-aware sizing. What is
+not demonstrated, and now has 95 windows saying so, is that any of this beats
+owning the universe.
+
+**Read the intervals as descriptive.** The windows overlap by design — 252 days
+stepping 63 — so they are not independent observations. The win counts and the
+paired bootstrap intervals inherit that dependence and are not significance
+tests. The effects that matter here (9 points, 14 points) are far larger than
+that caveat; the one that does not (0.2 points) is a null either way.
 
 ## Falsifier thresholds that the gate will actually accept
 

@@ -293,4 +293,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except BrokenPipeError:
+        # `--report ... | head` closes the pipe early; that is not a failure.
+        # Python flushes stdout at exit and would re-raise, so retarget it.
+        import os
+
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        raise SystemExit(0)
