@@ -89,14 +89,26 @@ def test_state_dependent_processes_branch_on_their_state():
     assert storm > calm + 0.10, f"{calm=} {storm=}"
 
 
-def test_forward_paths_are_zero_mean_so_truth_is_not_drifting():
-    """Every process is driftless, so a terminal-above-zero falsifier is a coin flip."""
+def test_the_panel_contains_both_driftless_and_drifting_processes():
+    """A driftless-only panel cannot expose what a zero-drift null costs.
+
+    On a driftless process, ending above the start is a coin flip; on a drifting
+    one it is not, and the gap is exactly the error a zero-drift null makes on a
+    real asset.
+    """
+    driftless, drifting = [], []
     for dgp in DEFAULT_PANEL:
         state = dgp.simulate(np.random.default_rng(6), 500)[1]
         p = true_probability(
             dgp, state, TerminalAbove(0.0), 60, np.random.default_rng(7), 40_000
         )
-        assert abs(p - 0.5) < 0.04, f"{dgp.name}: {p}"
+        (drifting if getattr(dgp, "mu", 0.0) else driftless).append((dgp.name, p))
+
+    assert driftless and drifting, "the panel needs both kinds"
+    for name, p in driftless:
+        assert abs(p - 0.5) < 0.04, f"{name}: {p}"
+    for name, p in drifting:
+        assert p > 0.54, f"{name}: {p} -- positive drift should lift this above a coin flip"
 
 
 def test_forward_paths_have_the_requested_shape():

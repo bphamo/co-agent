@@ -104,12 +104,15 @@ def build_pool(
     returns: np.ndarray,
     *,
     cond_vol: bool,
-    drift_zero: bool,
+    drift_target: float | None,
     ewma_lambda: float,
     ewma_warmup: int,
     min_history: int,
 ) -> Pool:
     """Prepare the resampling pool.
+
+    ``drift_target`` recentres the pool to a given mean daily return; ``None``
+    leaves the symbol's realised drift untouched.
 
     With ``cond_vol``, returns are standardised by their own one-step-ahead EWMA
     volatility and re-inflated by the current forecast, so the null is
@@ -141,7 +144,11 @@ def build_pool(
     else:
         pool, scale, current = returns.astype(np.float64, copy=True), 1.0, None
 
-    if drift_zero:
-        pool = pool - pool.mean()
+    if drift_target is not None:
+        # Recentre so that a drawn value (pool entry x scale) has mean
+        # `drift_target` per day. With volatility conditioning the pool holds
+        # standardised returns, so the target is divided by the same scale it
+        # will be multiplied by.
+        pool = pool - pool.mean() + drift_target / scale
 
     return Pool(returns=pool, scale=scale, sigma_current=current)

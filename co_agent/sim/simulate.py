@@ -69,8 +69,31 @@ class Config:
     max_paths: int = 160_000
     #: Expected geometric block length, in trading days.
     mean_block_len: float = 10.0
-    #: Whether the null carries the symbol's realised drift.
-    drift: Drift = Drift.ZERO
+    #: What drift the null carries.
+    #:
+    #: Defaults to SHRUNK on measured evidence from two directions. On real TSX
+    #: data (48 names, 4,119 windows) the weighted calibration error is 0.073
+    #: for ZERO, 0.035 for HISTORICAL and 0.027 for SHRUNK. On drifting synthetic
+    #: processes, where truth is computable, ZERO carries the bias (+0.038 to
+    #: +0.059) and HISTORICAL carries the variance -- a single name's drift over
+    #: 1,600 days has a standard error near 12.6%/year against a signal of maybe
+    #: 8%, so its sign is not even reliable. Shrinking toward a cross-sectional
+    #: baseline cuts that error by sqrt(N).
+    #:
+    #: SHRUNK requires `Request.baseline_drift`; there is no fallback, because a
+    #: silently assumed market drift would be an undeclared input to every figure.
+    #: Pass Drift.HISTORICAL explicitly for a one-off with no universe to hand.
+    drift: Drift = Drift.SHRUNK
+    #: Weight on the symbol's own drift under Drift.SHRUNK; the remainder goes to
+    #: the supplied baseline. 1.0 reproduces HISTORICAL, 0.0 uses the baseline
+    #: alone.
+    #:
+    #: 0.25 sits inside a flat region: on real data 0.0, 0.25 and 0.5 score
+    #: 0.0268, 0.0278 and 0.0276, indistinguishable. The synthetic panel prefers
+    #: 0.0 outright, but its baseline was the process's exact mu, which flatters
+    #: a pure-baseline setting in a way a real estimated baseline does not. 0.25
+    #: keeps some symbol information without resting on that idealisation.
+    drift_shrinkage: float = 0.25
     #: Standardise by EWMA volatility and re-inflate at the current forecast,
     #: conditioning the null on today's regime.
     #:
@@ -112,6 +135,8 @@ class Config:
             raise SimInputError("ewma_warmup must be >= 2")
         if self.min_history <= 0:
             raise SimInputError("min_history must be > 0")
+        if not 0 <= self.drift_shrinkage <= 1:
+            raise SimInputError("drift_shrinkage must be in [0,1]")
         if self.outer_resamples < 2:
             raise SimInputError("outer_resamples must be >= 2")
         if self.inner_paths <= 0:
@@ -144,6 +169,10 @@ class Request:
 
     proposed_weight: float = 0.0
     per_position_drawdown_limit: float = 0.0
+    #: Mean daily log return of a market or sector baseline, as of this origin.
+    #: Required by Drift.SHRUNK and ignored otherwise. There is no default: a
+    #: silently assumed baseline would be an undeclared input to every figure.
+    baseline_drift: float | None = None
 
     band: Band = field(default_factory=Band)
     config: Config = field(default_factory=Config)
@@ -215,10 +244,11 @@ def run(request: Request) -> Result:
     if returns.size < cfg.min_history:
         raise InsufficientHistoryError(returns.size, cfg.min_history)
 
+    drift_target = _drift_target(returns, cfg, request.baseline_drift)
     pool = build_pool(
         returns,
         cond_vol=cfg.cond_vol,
-        drift_zero=cfg.drift is Drift.ZERO,
+        drift_target=drift_target,
         ewma_lambda=cfg.ewma_lambda,
         ewma_warmup=cfg.ewma_warmup,
         min_history=cfg.min_history,
@@ -255,7 +285,7 @@ def run(request: Request) -> Result:
 
         if cfg.interval is Interval.DOUBLE_BOOTSTRAP:
             ci_low, ci_high = _double_bootstrap_interval(
-                returns, request.falsifier, request.horizon_days, cfg
+                returns, request.falsifier, request.horizon_days, cfg, drift_target
             )
         else:
             ci_low, ci_high = mc_low, mc_high
@@ -292,6 +322,8 @@ def run(request: Request) -> Result:
         history_sha256=sha256_returns(returns),
         seed=cfg.seed,
         gate_band=(band.low, band.high),
+        drift_shrinkage=cfg.drift_shrinkage if cfg.drift is Drift.SHRUNK else None,
+        baseline_drift=request.baseline_drift if cfg.drift is Drift.SHRUNK else None,
         interval_method=str(cfg.interval),
         outer_resamples=(
             cfg.outer_resamples if cfg.interval is Interval.DOUBLE_BOOTSTRAP else None
@@ -363,6 +395,7 @@ def _double_bootstrap_interval(
     falsifier: Falsifier,
     horizon: int,
     cfg: Config,
+    drift_target: float | None,
 ) -> tuple[float, float]:
     """Spread of the estimate across resampled histories.
 
@@ -389,7 +422,7 @@ def _double_bootstrap_interval(
             pool = build_pool(
                 replicate,
                 cond_vol=cfg.cond_vol,
-                drift_zero=cfg.drift is Drift.ZERO,
+                drift_target=drift_target,
                 ewma_lambda=cfg.ewma_lambda,
                 ewma_warmup=cfg.ewma_warmup,
                 min_history=cfg.min_history,
@@ -408,3 +441,27 @@ def _double_bootstrap_interval(
         # confidently wrong.
         return 0.0, 1.0
     return float(np.quantile(usable, 0.025)), float(np.quantile(usable, 0.975))
+
+
+def _drift_target(
+    returns: np.ndarray, cfg: Config, baseline: float | None
+) -> float | None:
+    """The mean daily return the null should carry, or None to keep the symbol's.
+
+    ``SHRUNK`` needs a baseline and will not invent one: an assumed market drift
+    would be an undeclared input to every ``null_probability`` computed with it.
+    """
+    match cfg.drift:
+        case Drift.ZERO:
+            return 0.0
+        case Drift.HISTORICAL:
+            return None
+        case Drift.SHRUNK:
+            if baseline is None:
+                raise SimInputError(
+                    "Drift.SHRUNK requires request.baseline_drift "
+                    "(a market or sector mean daily log return)"
+                )
+            w = cfg.drift_shrinkage
+            return w * float(returns.mean()) + (1 - w) * baseline
+    raise SimInputError(f"unhandled drift mode {cfg.drift!r}")

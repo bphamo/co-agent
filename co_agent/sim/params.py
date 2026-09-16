@@ -23,7 +23,7 @@ import numpy as np
 #: Identifies the simulator's behaviour.  Bump it on any change that would move
 #: a figure, so a stored ``null_probability`` can be invalidated rather than
 #: silently compared against one produced by different code.
-VERSION = "sim/2"
+VERSION = "sim/3"
 
 
 class Method(StrEnum):
@@ -53,6 +53,11 @@ class Drift(StrEnum):
 
     ZERO = "zero"
     HISTORICAL = "historical"
+    #: A weighted blend of the symbol's realised drift and a supplied baseline
+    #: (a market or sector mean). Zero drift misstates the counterfactual for an
+    #: asset that drifts; the symbol's own drift extrapolates its momentum.
+    #: Shrinking toward a baseline is the middle, and the weight is measurable.
+    SHRUNK = "shrunk"
 
 
 class SimInputError(ValueError):
@@ -141,6 +146,8 @@ class Params:
     history_sha256: str
     seed: int
     gate_band: tuple[float, float]
+    drift_shrinkage: float | None = None
+    baseline_drift: float | None = None
     interval_method: str | None = None
     outer_resamples: int | None = None
     ewma_lambda: float | None = None

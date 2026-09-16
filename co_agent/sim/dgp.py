@@ -66,22 +66,27 @@ class IIDNormal:
     No volatility clustering and no fat tails, so a block bootstrap has nothing
     to preserve and should be close to unbiased here.  A bias on this process is
     a bug in the estimator, not a limitation of the method.
+
+    ``mu`` is the daily log drift. It defaults to zero, which is convenient and
+    unlike any traded asset: 0.0003/day is about 8%/year, and a process with
+    drift is the only kind that can expose what a zero-drift null costs.
     """
 
     vol: float = 0.02
+    mu: float = 0.0
 
     @property
     def name(self) -> str:
-        return "iid_normal"
+        return "iid_normal" if self.mu == 0 else "iid_normal_drift"
 
     def params(self) -> dict[str, object]:
-        return {"vol": self.vol}
+        return {"vol": self.vol, "mu": self.mu}
 
     def simulate(self, rng, n, state=None):
-        return rng.normal(0.0, self.vol, n), None
+        return rng.normal(self.mu, self.vol, n), None
 
     def forward_paths(self, rng, state, horizon, paths):
-        return rng.normal(0.0, self.vol, (paths, horizon))
+        return rng.normal(self.mu, self.vol, (paths, horizon))
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +137,9 @@ class Garch11:
     omega: float = 8.0e-6
     alpha: float = 0.08
     beta: float = 0.90
+    #: Daily log drift. The variance recursion is driven by the residual, so
+    #: drift shifts the mean without inflating the conditional variance.
+    mu: float = 0.0
 
     def __post_init__(self) -> None:
         if self.alpha + self.beta >= 1:
@@ -139,10 +147,15 @@ class Garch11:
 
     @property
     def name(self) -> str:
-        return "garch11"
+        return "garch11" if self.mu == 0 else "garch11_drift"
 
     def params(self) -> dict[str, object]:
-        return {"omega": self.omega, "alpha": self.alpha, "beta": self.beta}
+        return {
+            "omega": self.omega,
+            "alpha": self.alpha,
+            "beta": self.beta,
+            "mu": self.mu,
+        }
 
     def unconditional_vol(self) -> float:
         return float(np.sqrt(self.omega / (1 - self.alpha - self.beta)))
@@ -154,8 +167,9 @@ class Garch11:
         out = np.empty(n)
         z = rng.normal(0.0, 1.0, n)
         for t in range(n):
-            out[t] = np.sqrt(sigma2) * z[t]
-            sigma2 = self.omega + self.alpha * out[t] ** 2 + self.beta * sigma2
+            shock = np.sqrt(sigma2) * z[t]
+            out[t] = self.mu + shock
+            sigma2 = self.omega + self.alpha * shock**2 + self.beta * sigma2
         return out, sigma2
 
     def forward_paths(self, rng, state, horizon, paths):
@@ -163,8 +177,9 @@ class Garch11:
         out = np.empty((paths, horizon))
         z = rng.normal(0.0, 1.0, (paths, horizon))
         for t in range(horizon):
-            out[:, t] = np.sqrt(sigma2) * z[:, t]
-            sigma2 = self.omega + self.alpha * out[:, t] ** 2 + self.beta * sigma2
+            shock = np.sqrt(sigma2) * z[:, t]
+            out[:, t] = self.mu + shock
+            sigma2 = self.omega + self.alpha * shock**2 + self.beta * sigma2
         return out
 
 
@@ -213,11 +228,22 @@ class RegimeSwitch:
         return out
 
 
-#: The default panel for a bias study: easy baseline, fat tails, clustering, and
-#: the case built to break an unconditional estimator.
+#: About 8%/year in daily log terms -- a plausible equity drift, and the value
+#: the drifting panel members use.
+EQUITY_DRIFT = 0.0003
+
+#: The default panel: easy baseline, fat tails, clustering, the case built to
+#: break an unconditional estimator, and two drifting processes.
+#:
+#: The drifting pair is not decoration. Every other process here has zero mean,
+#: which makes a zero-drift null exactly right and hides what that choice costs
+#: on a real asset. Without them the panel would pass an estimator that is
+#: measurably biased on TSX data.
 DEFAULT_PANEL: tuple[DGP, ...] = (
     IIDNormal(),
     StudentT(),
     Garch11(),
     RegimeSwitch(),
+    IIDNormal(mu=EQUITY_DRIFT),
+    Garch11(mu=EQUITY_DRIFT),
 )

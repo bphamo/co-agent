@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import date
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 
@@ -80,6 +80,7 @@ class BiasReport:
     horizon_days: int
     history_obs: int
     cond_vol: bool
+    drift: str = "zero"
     trials: list[Trial] = field(default_factory=list)
     skipped: int = 0
 
@@ -156,6 +157,7 @@ def bias_study(
     config: Config | None = None,
     band: Band | None = None,
     truth_paths: int = 40_000,
+    baseline_drift: float | None = None,
     seed: int = 12345,
 ) -> BiasReport:
     """Measure the estimator against a process whose truth can be computed.
@@ -177,6 +179,7 @@ def bias_study(
         horizon_days=horizon_days,
         history_obs=history_obs,
         cond_vol=cfg.cond_vol,
+        drift=str(cfg.drift),
     )
 
     for i in range(trials):
@@ -189,6 +192,7 @@ def bias_study(
             horizon_days=horizon_days,
             falsifier=falsifier,
             band=band,
+            baseline_drift=baseline_drift,
             # Vary the estimator's seed per trial; everything else is held.
             config=replace(cfg, seed=cfg.seed + i),
         )
@@ -230,6 +234,42 @@ class Observation:
     origin_date: date | None = None
 
 
+def market_drift_by_date(
+    series_by_symbol: "Mapping[str, object]", window: int
+) -> dict[date, float]:
+    """Trailing mean daily log return of an equal-weighted basket, per date.
+
+    The baseline for :data:`Drift.SHRUNK`. A single name's drift estimated over
+    1,600 days carries a standard error of roughly 12.6%/year against a signal
+    of maybe 8%/year -- the estimate's sign is not even reliable. Averaging
+    across N names cuts that error by sqrt(N), which is the entire reason to
+    shrink toward it.
+
+    Each date's value uses returns up to and including that date, and nothing
+    after, so it can be handed to a walk-forward origin without leaking.
+    Symbols with no data on a given day simply do not contribute to it.
+    """
+    from collections import defaultdict
+
+    by_date: dict[date, list[float]] = defaultdict(list)
+    for px in series_by_symbol.values():
+        returns = px.log_returns  # type: ignore[attr-defined]
+        dates = px.dates  # type: ignore[attr-defined]
+        for i, r in enumerate(returns):
+            by_date[dates[i + 1]].append(float(r))
+
+    ordered = sorted(by_date)
+    market = np.array([float(np.mean(by_date[d])) for d in ordered])
+    cumulative = np.cumsum(market)
+
+    out: dict[date, float] = {}
+    for i, when in enumerate(ordered):
+        lo = max(0, i - window + 1)
+        total = cumulative[i] - (cumulative[lo - 1] if lo > 0 else 0.0)
+        out[when] = float(total / (i - lo + 1))
+    return out
+
+
 def non_overlapping_origins(n_obs: int, history_obs: int, horizon: int) -> list[int]:
     """Origin indices spaced so their outcome windows do not overlap.
 
@@ -253,6 +293,7 @@ def walk_forward(
     config: Config | None = None,
     overlapping: bool = False,
     dates: Sequence[date] | None = None,
+    baseline: "Mapping[date, float] | None" = None,
 ) -> list[Observation]:
     """Predict at each origin using only prior data, then observe the outcome.
 
@@ -273,6 +314,7 @@ def walk_forward(
     for origin in origins:
         past = returns[origin - history_obs : origin]
         future = returns[origin : origin + horizon_days]
+        origin_date = dates[origin + 1] if dates is not None else None
 
         try:
             result = run(
@@ -281,6 +323,11 @@ def walk_forward(
                     horizon_days=horizon_days,
                     falsifier=falsifier,
                     config=cfg,
+                    baseline_drift=(
+                        baseline.get(origin_date)
+                        if baseline is not None and origin_date is not None
+                        else None
+                    ),
                 )
             )
         except (InsufficientHistoryError, SimInputError):
@@ -295,7 +342,7 @@ def walk_forward(
                 tripped=bool(falsifier.trips(realised)[0]),
                 # `dates` indexes closes; returns are one shorter, so return i
                 # ends on close i+1.
-                origin_date=dates[origin + 1] if dates is not None else None,
+                origin_date=origin_date,
             )
         )
     return out
@@ -471,9 +518,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cond-vol", action="store_true", help="condition on current volatility")
     parser.add_argument(
         "--drift",
-        choices=["zero", "historical"],
+        choices=["zero", "historical", "shrunk"],
         default="zero",
-        help="zero demeans the pool; historical keeps the symbol's realised drift",
+        help="zero demeans the pool; historical keeps the symbol's realised drift; "
+        "shrunk blends it with an equal-weighted market baseline",
+    )
+    parser.add_argument(
+        "--shrinkage", type=float, default=0.5, help="weight on the symbol's own drift"
     )
     parser.add_argument("--prices", type=str, default=None, help="run the walk-forward instead")
     parser.add_argument("--seed", type=int, default=12345)
@@ -487,6 +538,7 @@ def main(argv: list[str] | None = None) -> int:
         interval=Interval(args.interval),
         cond_vol=args.cond_vol,
         drift=Drift(args.drift),
+        drift_shrinkage=args.shrinkage,
         seed=args.seed,
     )
     band = Band()
@@ -495,9 +547,16 @@ def main(argv: list[str] | None = None) -> int:
         from ..data import load_dir, suspicious_returns
 
         series = load_dir(args.prices, min_obs=args.history + args.horizon + 1)
+        baseline = (
+            market_drift_by_date(series, args.history)
+            if cfg.drift is Drift.SHRUNK
+            else None
+        )
         print(
             f"walk-forward: {len(series)} symbols, horizon {args.horizon}d, "
-            f"non-overlapping windows, drift={args.drift}, cond_vol={args.cond_vol}"
+            f"non-overlapping windows, drift={args.drift}"
+            + (f" (w={args.shrinkage})" if cfg.drift is Drift.SHRUNK else "")
+            + f", cond_vol={args.cond_vol}"
         )
         observations: list[Observation] = []
         for symbol, px in sorted(series.items()):
@@ -512,6 +571,7 @@ def main(argv: list[str] | None = None) -> int:
                 history_obs=args.history,
                 config=cfg,
                 dates=px.dates,
+                baseline=baseline,
             )
         print(f"  {len(observations)} observations\n")
         print(format_reliability(reliability(observations)))

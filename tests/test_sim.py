@@ -40,10 +40,12 @@ def base_request(falsifier: sim.Falsifier | None = None, **kwargs) -> sim.Reques
         falsifier=falsifier,
         proposed_weight=0.05,
         per_position_drawdown_limit=0.02,
-        # MC unless a test is about interval width: the double bootstrap runs
-        # `outer_resamples` extra simulations, which is right in production and
-        # 25x too slow for a unit test.
-        config=sim.Config(interval=Interval.MC),
+        # Drift and interval are pinned rather than inherited: the default drift
+        # mode needs a market baseline these single-series fixtures do not have,
+        # and the double bootstrap runs `outer_resamples` extra simulations,
+        # which is right in production and 25x too slow for a unit test. Tests
+        # about either pass their own config.
+        config=sim.Config(interval=Interval.MC, drift=sim.Drift.ZERO),
     )
     params.update(kwargs)
     return sim.Request(**params)
@@ -59,13 +61,13 @@ def test_run_is_deterministic():
     assert a.params.version == sim.VERSION
 
     # A different seed must move the figure, or the seed is not being used.
-    c = sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(seed=99, interval=Interval.MC)))
+    c = sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(seed=99, interval=Interval.MC, drift=sim.Drift.ZERO)))
     assert c.null_probability != a.null_probability
 
 
 def test_demeaned_pool_ends_above_half_the_time():
     """The one analytic anchor available without a closed form for the rest."""
-    res = sim.run(base_request(sim.TerminalAbove(0.0), config=sim.Config(paths=20_000, interval=Interval.MC)))
+    res = sim.run(base_request(sim.TerminalAbove(0.0), config=sim.Config(paths=20_000, interval=Interval.MC, drift=sim.Drift.ZERO)))
     assert abs(res.null_probability - 0.5) < 0.03
 
 
@@ -98,7 +100,7 @@ def test_conditioning_needs_history_beyond_the_warmup():
     req = base_request(
         sim.TouchBelow(0.12),
         history=history(n=800),
-        config=sim.Config(min_history=760, ewma_warmup=60, cond_vol=True),
+        config=sim.Config(min_history=760, ewma_warmup=60, cond_vol=True, drift=sim.Drift.ZERO),
     )
     with pytest.raises(sim.InsufficientHistoryError) as excinfo:
         sim.run(req)
@@ -182,7 +184,7 @@ def test_indeterminate_escalates_the_path_count():
     req = base_request(
         sim.TouchBelow(0.12),
         band=sim.Band(low=first.null_probability, high=first.null_probability + 0.25),
-        config=sim.Config(max_paths=160_000, interval=Interval.MC),
+        config=sim.Config(max_paths=160_000, interval=Interval.MC, drift=sim.Drift.ZERO),
     )
     res = sim.run(req)
     assert res.escalations > 0
@@ -199,7 +201,7 @@ def test_boundary_holds_indeterminate_rather_than_guessing():
     req = base_request(
         sim.TouchBelow(0.12),
         band=sim.Band(low=p - 0.0005, high=p + 0.0005),
-        config=sim.Config(paths=10_000, max_paths=10_000, interval=Interval.MC),
+        config=sim.Config(paths=10_000, max_paths=10_000, interval=Interval.MC, drift=sim.Drift.ZERO),
     )
     res = sim.run(req)
     assert res.verdict is sim.Verdict.INDETERMINATE
@@ -218,7 +220,7 @@ def test_conditioning_on_current_vol_moves_the_null():
         req = base_request(
             sim.TouchBelow(0.15),
             history=sim.History("T", 1, returns),
-            config=sim.Config(cond_vol=cond_vol, interval=Interval.MC),
+            config=sim.Config(cond_vol=cond_vol, interval=Interval.MC, drift=sim.Drift.ZERO),
         )
         return sim.run(req).null_probability
 
@@ -234,11 +236,11 @@ def test_conditioning_on_current_vol_moves_the_null():
 def test_batching_handles_a_path_count_above_one_batch():
     """A 40,000-path escalation spans batches; the estimate must stay sane."""
     small = sim.run(base_request(sim.TouchBelow(0.12)))
-    large = sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(paths=40_000, interval=Interval.MC)))
+    large = sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(paths=40_000, interval=Interval.MC, drift=sim.Drift.ZERO)))
     assert large.paths == 40_000
     assert abs(large.null_probability - small.null_probability) < 0.03
     # Same (seed, paths) is reproducible even across batch boundaries.
-    again = sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(paths=40_000, interval=Interval.MC)))
+    again = sim.run(base_request(sim.TouchBelow(0.12), config=sim.Config(paths=40_000, interval=Interval.MC, drift=sim.Drift.ZERO)))
     assert again.null_probability == large.null_probability
 
 
@@ -286,6 +288,12 @@ def test_result_carries_no_synthetic_paths():
 # --------------------------------------------------------- interval and defaults
 
 
+def test_drift_defaults_to_shrunk_toward_a_baseline():
+    """Measured best of the three on real TSX data and on drifting synthetics."""
+    assert sim.Config().drift is sim.Drift.SHRUNK
+    assert sim.Config().drift_shrinkage == 0.25
+
+
 def test_cond_vol_is_off_by_default():
     """Measured on the synthetic panel: conditioning raises error at 60 days."""
     assert sim.Config().cond_vol is False
@@ -302,7 +310,7 @@ def test_double_bootstrap_is_much_wider_than_monte_carlo_error():
     The double bootstrap says how much it would move on a different sample of the
     same process -- which is 3-7x larger, and is what the gate should be judging.
     """
-    req = base_request(sim.TouchBelow(0.12), config=sim.Config(outer_resamples=12))
+    req = base_request(sim.TouchBelow(0.12), config=sim.Config(outer_resamples=12, drift=sim.Drift.ZERO))
     res = sim.run(req)
     assert res.interval is Interval.DOUBLE_BOOTSTRAP
     mc_width = res.mc_ci_high - res.mc_ci_low
@@ -318,7 +326,7 @@ def test_monte_carlo_interval_is_reported_under_both_methods():
         res = sim.run(
             base_request(
                 sim.TouchBelow(0.12),
-                config=sim.Config(interval=interval, outer_resamples=8),
+                config=sim.Config(interval=interval, outer_resamples=8, drift=sim.Drift.ZERO),
             )
         )
         assert res.mc_ci_low < res.null_probability < res.mc_ci_high
@@ -338,7 +346,7 @@ def test_escalation_only_applies_to_the_monte_carlo_interval():
         base_request(
             sim.TouchBelow(0.12),
             band=boundary,
-            config=sim.Config(interval=Interval.MC, max_paths=160_000),
+            config=sim.Config(interval=Interval.MC, max_paths=160_000, drift=sim.Drift.ZERO),
         )
     )
     assert mc.escalations > 0
@@ -348,7 +356,8 @@ def test_escalation_only_applies_to_the_monte_carlo_interval():
             sim.TouchBelow(0.12),
             band=boundary,
             config=sim.Config(
-                interval=Interval.DOUBLE_BOOTSTRAP, outer_resamples=8, max_paths=160_000
+                interval=Interval.DOUBLE_BOOTSTRAP, outer_resamples=8,
+                max_paths=160_000, drift=sim.Drift.ZERO,
             ),
         )
     )
@@ -359,12 +368,12 @@ def test_escalation_only_applies_to_the_monte_carlo_interval():
 def test_interval_method_is_recorded_for_reproducibility():
     """A stored verdict depends on which interval produced it."""
     res = sim.run(
-        base_request(sim.TouchBelow(0.12), config=sim.Config(outer_resamples=8))
+        base_request(sim.TouchBelow(0.12), config=sim.Config(outer_resamples=8, drift=sim.Drift.ZERO))
     )
     params = res.params.to_dict()
     assert params["interval_method"] == "double_bootstrap"
     assert params["outer_resamples"] == 8
-    assert params["version"] == "sim/2"
+    assert params["version"] == "sim/3"
 
     mc = sim.run(base_request(sim.TouchBelow(0.12)))
     assert mc.params.to_dict()["interval_method"] == "mc"
@@ -393,3 +402,101 @@ def test_touch_falsifiers_are_close_based_not_intraday():
     assert sim.TouchBelow(0.12).trips(closes)[0]
     # Terminal falsifiers ignore the interior entirely.
     assert not sim.TerminalBelow(0.12).trips(closes)[0]
+
+
+# ------------------------------------------------------------------ drift modes
+
+
+def _drifting_history(mu: float = 0.0003, n: int = 1600, seed: int = 5) -> sim.History:
+    return sim.History("D.TO", 7, np.random.default_rng(seed).normal(mu, 0.02, n))
+
+
+def test_zero_drift_makes_downside_falsifiers_likelier_than_drifting_ones():
+    """The mechanism behind the measured overstatement on real data.
+
+    Stripping drift from an asset that drifts upward does not produce a
+    forecaster with no information about direction -- it produces a
+    counterfactual in which the stock falls more often than it really does.
+    """
+    history = _drifting_history(mu=0.0008)  # a firmly rising name
+    def null(drift, **kw):
+        return sim.run(
+            base_request(
+                sim.TouchBelow(0.12),
+                history=history,
+                config=sim.Config(drift=drift, interval=Interval.MC),
+                **kw,
+            )
+        ).null_probability
+
+    assert null(sim.Drift.ZERO) > null(sim.Drift.HISTORICAL)
+
+
+def test_shrunk_drift_sits_between_its_two_endpoints():
+    history = _drifting_history(mu=0.0008)
+    baseline = 0.0001  # a much flatter market
+
+    def null(w):
+        return sim.run(
+            base_request(
+                sim.TouchBelow(0.12),
+                history=history,
+                baseline_drift=baseline,
+                config=sim.Config(
+                    drift=sim.Drift.SHRUNK, drift_shrinkage=w, interval=Interval.MC
+                ),
+            )
+        ).null_probability
+
+    own, blended, market = null(1.0), null(0.5), null(0.0)
+    assert min(own, market) <= blended <= max(own, market)
+    # w=1 reproduces the symbol's own drift exactly.
+    historical = sim.run(
+        base_request(
+            sim.TouchBelow(0.12),
+            history=history,
+            config=sim.Config(drift=sim.Drift.HISTORICAL, interval=Interval.MC),
+        )
+    ).null_probability
+    assert own == pytest.approx(historical, abs=0.02)
+
+
+def test_shrunk_drift_refuses_to_invent_a_baseline():
+    """An assumed market drift would be an undeclared input to every figure."""
+    with pytest.raises(sim.SimInputError, match="baseline_drift"):
+        sim.run(
+            base_request(
+                sim.TouchBelow(0.12),
+                config=sim.Config(drift=sim.Drift.SHRUNK, interval=Interval.MC),
+            )
+        )
+
+
+def test_drift_shrinkage_is_validated():
+    for w in (-0.1, 1.1):
+        with pytest.raises(sim.SimInputError, match="drift_shrinkage"):
+            sim.run(
+                base_request(
+                    sim.TouchBelow(0.12),
+                    baseline_drift=0.0,
+                    config=sim.Config(drift=sim.Drift.SHRUNK, drift_shrinkage=w),
+                )
+            )
+
+
+def test_shrinkage_and_baseline_are_recorded_only_when_they_applied():
+    shrunk = sim.run(
+        base_request(
+            sim.TouchBelow(0.12),
+            baseline_drift=0.0002,
+            config=sim.Config(
+                drift=sim.Drift.SHRUNK, drift_shrinkage=0.25, interval=Interval.MC
+            ),
+        )
+    ).params.to_dict()
+    assert shrunk["drift"] == "shrunk"
+    assert shrunk["drift_shrinkage"] == 0.25
+    assert shrunk["baseline_drift"] == 0.0002
+
+    plain = sim.run(base_request(sim.TouchBelow(0.12))).params.to_dict()
+    assert "drift_shrinkage" not in plain and "baseline_drift" not in plain

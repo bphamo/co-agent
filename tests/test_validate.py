@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from co_agent.sim import Band, Config, Interval, TerminalAbove, TouchBelow, Verdict
+from co_agent.sim import Band, Config, Drift, Interval, TerminalAbove, TouchBelow, Verdict
 from co_agent.sim.dgp import Garch11, IIDNormal, RegimeSwitch
 from co_agent.sim.validate import (
     Observation,
@@ -22,7 +22,10 @@ from co_agent.sim.validate import (
     walk_forward,
 )
 
-MC = Config(paths=4_000, interval=Interval.MC)
+# These tests are about the harness -- truth, origins, binning, intervals -- not
+# about drift, so they pin the drift mode rather than inherit the default (which
+# requires a market baseline these single-series fixtures do not have).
+MC = Config(paths=4_000, interval=Interval.MC, drift=Drift.ZERO)
 
 
 # --------------------------------------------------------------- known truth
@@ -51,7 +54,7 @@ def test_bias_study_reports_every_field_a_finding_needs():
     assert r.n == 8
     assert r.skipped == 0
     assert r.dgp == "iid_normal"
-    assert r.dgp_params == {"vol": 0.02}
+    assert r.dgp_params == {"vol": 0.02, "mu": 0.0}
     assert r.falsifier["kind"] == "touch_below"
     assert 0 < r.mean_truth < 1
     assert r.mae >= abs(r.bias), "mean absolute error cannot be below the mean signed error"
@@ -101,7 +104,7 @@ def test_the_monte_carlo_interval_under_covers_on_clustered_data():
         TouchBelow(0.12),
         trials=25,
         truth_paths=10_000,
-        config=Config(paths=10_000, interval=Interval.MC),
+        config=Config(paths=10_000, interval=Interval.MC, drift=Drift.ZERO),
     )
     assert r.coverage < 0.5, f"coverage={r.coverage}"
 
@@ -113,7 +116,7 @@ def test_the_double_bootstrap_interval_covers_on_iid_data():
         trials=15,
         truth_paths=10_000,
         config=Config(paths=4_000, interval=Interval.DOUBLE_BOOTSTRAP, outer_resamples=12,
-                      inner_paths=1_500),
+                      inner_paths=1_500, drift=Drift.ZERO),
     )
     assert r.coverage > 0.6, f"coverage={r.coverage}"
 
@@ -273,3 +276,76 @@ def test_walk_forward_records_origin_dates_when_given_them():
     assert obs and all(o.origin_date is not None for o in obs)
     # The origin date is the day the history ends, not the day it starts.
     assert obs[0].origin_date == dates[801]
+
+
+# ------------------------------------------------------------- market baseline
+
+
+class _FakeSeries:
+    def __init__(self, dates, returns):
+        self.dates = dates
+        self._returns = np.asarray(returns, dtype=float)
+
+    @property
+    def log_returns(self):
+        return self._returns
+
+
+def _series(start_day, returns):
+    from datetime import date as _d, timedelta
+
+    dates = [_d(2020, 1, 1) + timedelta(days=start_day + i) for i in range(len(returns) + 1)]
+    return _FakeSeries(dates, returns)
+
+
+def test_market_baseline_averages_across_symbols_on_each_date():
+    from co_agent.sim.validate import market_drift_by_date
+
+    a = _series(0, [0.02, 0.02, 0.02])
+    b = _series(0, [0.00, 0.00, 0.00])
+    baseline = market_drift_by_date({"A": a, "B": b}, window=1)
+    # Each date's cross-sectional mean of 0.02 and 0.00 is 0.01.
+    assert sorted(baseline.values()) == pytest.approx([0.01, 0.01, 0.01])
+
+
+def test_market_baseline_uses_a_trailing_window():
+    from co_agent.sim.validate import market_drift_by_date
+
+    s = _series(0, [0.10, 0.00, 0.00, 0.00])
+    baseline = market_drift_by_date({"A": s}, window=2)
+    days = sorted(baseline)
+    assert baseline[days[0]] == pytest.approx(0.10)         # only one observation yet
+    assert baseline[days[1]] == pytest.approx(0.05)         # mean of 0.10 and 0.00
+    assert baseline[days[2]] == pytest.approx(0.00)         # the spike has rolled off
+
+
+def test_market_baseline_does_not_look_ahead():
+    """A baseline that saw the future would leak it into every origin."""
+    from co_agent.sim.validate import market_drift_by_date
+
+    calm = _series(0, [0.001, 0.001, 0.001, 0.001])
+    spike = _series(0, [0.001, 0.001, 0.001, 0.500])
+
+    a = market_drift_by_date({"A": calm}, window=1000)
+    b = market_drift_by_date({"A": spike}, window=1000)
+    days = sorted(a)
+    for day in days[:-1]:
+        assert a[day] == pytest.approx(b[day]), "a later return changed an earlier baseline"
+    assert a[days[-1]] != pytest.approx(b[days[-1]])
+
+
+def test_walk_forward_passes_the_baseline_for_each_origin():
+    """Without it every SHRUNK origin would reuse one market drift."""
+    from datetime import date as _d, timedelta
+
+    rng = np.random.default_rng(12)
+    series = rng.normal(0.0003, 0.02, 1000)
+    dates = [_d(2020, 1, 1) + timedelta(days=i) for i in range(1001)]
+    baseline = {d: 0.0002 for d in dates}
+
+    obs = walk_forward(
+        "X", series, TouchBelow(0.12), horizon_days=60, history_obs=800,
+        config=Config(paths=3_000, interval=Interval.MC, drift=Drift.SHRUNK),
+        dates=dates, baseline=baseline,
+    )
+    assert obs, "a missing baseline would have raised instead"

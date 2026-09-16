@@ -96,16 +96,20 @@ def test_ewma_sigma_returns_nan_without_enough_history():
     assert np.all(np.isnan(sigma))
 
 
-def test_build_pool_demeans_only_when_asked():
+def test_build_pool_recentres_only_when_given_a_target():
     r = np.random.default_rng(5).normal(0.01, 0.02, 1600)
     zero = build_pool(
-        r, cond_vol=False, drift_zero=True, ewma_lambda=0.94, ewma_warmup=60, min_history=750
+        r, cond_vol=False, drift_target=0.0, ewma_lambda=0.94, ewma_warmup=60, min_history=750
     )
     historical = build_pool(
-        r, cond_vol=False, drift_zero=False, ewma_lambda=0.94, ewma_warmup=60, min_history=750
+        r, cond_vol=False, drift_target=None, ewma_lambda=0.94, ewma_warmup=60, min_history=750
+    )
+    shifted = build_pool(
+        r, cond_vol=False, drift_target=0.001, ewma_lambda=0.94, ewma_warmup=60, min_history=750
     )
     assert zero.returns.mean() == pytest.approx(0.0, abs=1e-15)
     assert historical.returns.mean() == pytest.approx(r.mean())
+    assert shifted.returns.mean() == pytest.approx(0.001)
 
 
 def test_build_pool_rejects_history_that_cannot_be_standardised():
@@ -113,7 +117,7 @@ def test_build_pool_rejects_history_that_cannot_be_standardised():
         build_pool(
             np.zeros(30),
             cond_vol=True,
-            drift_zero=True,
+            drift_target=0.0,
             ewma_lambda=0.94,
             ewma_warmup=60,
             min_history=10,
@@ -122,7 +126,7 @@ def test_build_pool_rejects_history_that_cannot_be_standardised():
         build_pool(
             np.random.default_rng(1).normal(0, 0.02, 200),
             cond_vol=True,
-            drift_zero=True,
+            drift_target=0.0,
             ewma_lambda=0.94,
             ewma_warmup=60,
             min_history=750,
@@ -141,3 +145,19 @@ def test_max_drawdown():
     )
     got = max_drawdown(levels)
     assert got == pytest.approx([0.0, 0.1, 0.5, 0.5])
+
+
+def test_recentring_survives_volatility_conditioning():
+    """The target is in return space, but the pool holds standardised returns.
+
+    Recentring without dividing by the scale it will later be multiplied by
+    would put the drift in the wrong units -- silently, and by a factor of the
+    current volatility.
+    """
+    r = np.random.default_rng(9).normal(0.0, 0.02, 1600)
+    pool = build_pool(
+        r, cond_vol=True, drift_target=0.0005, ewma_lambda=0.94, ewma_warmup=60,
+        min_history=750,
+    )
+    drawn_mean = pool.returns.mean() * pool.scale
+    assert drawn_mean == pytest.approx(0.0005, rel=1e-6)

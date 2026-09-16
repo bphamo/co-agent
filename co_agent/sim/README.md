@@ -229,27 +229,63 @@ Predicted probability against what actually happened:
 | [0.2, 0.4) | 1637 | 0.277 | 0.164 | [0.133, 0.197] | **overstates** |
 | [0.4, 0.6) | 817 | 0.490 | 0.400 | [0.352, 0.447] | **overstates** |
 | [0.6, 0.8) | 43 | 0.630 | 0.535 | [0.390, 0.691] | ok (thin) |
-| **historical drift** | | | | | |
+| **historical drift** (w = 1) | | | | | |
 | [0.0, 0.2) | 2315 | 0.108 | 0.113 | [0.084, 0.145] | ok |
 | [0.2, 0.4) | 1120 | 0.281 | 0.210 | [0.166, 0.255] | overstates |
 | [0.4, 0.6) | 607 | 0.488 | 0.422 | [0.368, 0.477] | ok |
 | [0.6, 0.8) | 77 | 0.624 | 0.429 | [0.316, 0.570] | overstates (thin) |
 
-**The zero-drift null overstates downside falsifiers, and the symbol's own drift
-closes most of the gap.** The reason is not subtle once seen: equities have a
-positive expected return, so stripping drift does not produce "no information
-about direction" -- it produces an actively wrong counterfactual, in which the
-stock is more likely to fall 12% than it really is. `Drift.ZERO` remains the
-default because what "by chance" should mean is a modelling decision about the
-ledger's reference point rather than a bug, but the measurement favours
-including drift.
+**Drift is the largest single error, and neither extreme is the answer.**
+Sweeping the drift mode over the same 4,119 windows (`shrunk` blends the
+symbol's own drift with an equal-weighted market baseline; *w* is the weight on
+the symbol's own):
 
-Before flipping it, two things are worth testing, because `Drift.HISTORICAL`
-estimates drift from 1,600 days of one name and therefore extrapolates momentum:
-whether aggregate calibration improves at the cost of high-drift names
-individually, and whether shrinking the symbol's drift toward a market or sector
-baseline beats both. The middle bin still overstates by 0.07 with drift included,
-so drift is not the whole story either.
+| setting | weighted \|pred − realised\| | bins outside CI | worst gap |
+|---|---|---|---|
+| zero | 0.0726 | 2 of 4 | 0.073 |
+| historical | 0.0352 | 3 of 4 | 0.078 |
+| **shrunk, w = 0.00** | **0.0268** | **1 of 4** | 0.025 |
+| shrunk, w = 0.25 | 0.0278 | 1 of 4 | 0.026 |
+| shrunk, w = 0.50 | 0.0276 | 2 of 4 | 0.023 |
+
+The known-truth panel says the same thing and explains why, because there the
+error decomposes. On drifting processes (`mu` ≈ 8%/year):
+
+| process | drift | w | bias | MAE |
+|---|---|---|---|---|
+| IID + drift | zero | – | **+0.0383** | 0.0383 |
+| IID + drift | historical | – | +0.0010 | **0.0527** |
+| IID + drift | shrunk | 0.00 | +0.0012 | **0.0144** |
+| IID + drift | shrunk | 0.50 | +0.0000 | 0.0305 |
+| GARCH + drift | zero | – | **+0.0593** | 0.0774 |
+| GARCH + drift | historical | – | +0.0218 | 0.0722 |
+| GARCH + drift | shrunk | 0.00 | +0.0219 | **0.0602** |
+
+`ZERO` carries the bias and `HISTORICAL` carries the variance. Stripping drift
+from an asset that drifts upward does not produce a forecaster with no
+information about direction -- it produces a counterfactual in which the stock
+falls more often than it really does, worth +0.038 to +0.059 of spurious null
+probability. Using the symbol's own drift removes that bias and replaces it with
+estimation noise: **a single name's drift over 1,600 days has a standard error
+near 12.6%/year against a signal of maybe 8%**, so the estimate's sign is not
+reliable, and on the IID process `HISTORICAL` ends up with a *worse* total error
+than `ZERO`. Averaging across N names cuts that error by sqrt(N), which is the
+whole argument for shrinking toward a baseline.
+
+The GARCH rows also separate the two effects cleanly: its zero-drift bias of
++0.059 is roughly the IID drift effect (+0.038) plus the clustering bias
+measured on the driftless GARCH (+0.021). Drift and clustering are close to
+additive, and drift is the larger of the two.
+
+`Drift.SHRUNK` at `w = 0.25` is the default. On real data 0.00, 0.25 and 0.50
+score 0.0268, 0.0278 and 0.0276 -- indistinguishable, a flat region. The
+synthetic panel prefers 0.00 outright, but its baseline was each process's exact
+`mu`; a real cross-sectional baseline is itself estimated, so that preference is
+optimistic. 0.25 sits inside the flat region without discarding the symbol's own
+history on the strength of an idealisation. `SHRUNK` requires
+`Request.baseline_drift` and will not invent one -- an assumed market drift
+would be an undeclared input to every figure -- so a one-off with no universe to
+hand should pass `Drift.HISTORICAL` explicitly.
 
 **What this result cannot settle.** The universe was assembled today, so
 delisted names are missing and realised trip frequencies are biased *down* --
