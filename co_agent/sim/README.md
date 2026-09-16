@@ -294,6 +294,37 @@ confounded, and no amount of extra symbols fixes it; only a point-in-time
 constituent list would. The *comparison* between drift settings is unaffected,
 since both share the bias.
 
+### More history does not help, on real data
+
+The synthetic panel says error falls 12-31% going from ~1,600 observations to
+6,400. It does not replicate. Controlled test on real TSX data -- **the same 32
+symbols and the same 722 origins at every setting**, so only the history handed
+to the estimator varies:
+
+| history | Brier | reliability | weighted \|pred − realised\| | bins outside CI |
+|---|---|---|---|---|
+| 400 | 0.1381 | 0.0043 | 0.0585 | 1 of 4 |
+| 800 | **0.1304** | 0.0012 | 0.0179 | 1 of 4 |
+| **1600** (default) | 0.1347 | **0.0008** | **0.0177** | **0 of 3** |
+| 3200 | 0.1367 | 0.0022 | 0.0303 | 1 of 3 |
+| 6400 | 0.1354 | 0.0037 | 0.0422 | 1 of 3 |
+
+The curve is U-shaped with its floor at 800-1600. Twenty-five years of history
+*quadruples* the calibration error rather than reducing it.
+
+The panel was wrong here for a reason worth keeping in mind whenever it is used
+again: every process in it is stationary by construction, so more data is
+unconditionally more information. Real markets have structural breaks, and the
+bootstrap treats a 2003 trading day as an equally valid draw for 2026. It is
+not. **Leave `min_history` at 1600**; it was right by accident and is now right
+by measurement. Adding a regime-shifting process to the panel would close the
+gap that let it mislead.
+
+Varying `min_history` alone measures nothing, incidentally -- it is a floor
+check, not the amount of history the estimator uses. The sweep has to vary
+`history_obs` at fixed symbols and origins, or it compares different universes
+and different periods instead.
+
 **Still to run:** the falsifier-threshold sweep above covers one process and one
 falsifier family. The same sweep across `TerminalBelow` and `DrawdownExceeds`, and
 across horizon buckets, would say whether some falsifier *shapes* are
