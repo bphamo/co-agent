@@ -1,0 +1,34 @@
+friction sensitivity: 48 symbols, 4 windows of 252d
+  2002-01-08 -> 2026-06-29, monthly cadence, hold to horizon
+
+commission at the default schedule, slippage varied
+                            strategy  buy & hold       gap
+----------------------------------------------------------
+slippage    0bps              1.89%      11.96%   -10.06%
+slippage    5bps              0.92%      11.91%   -10.98%
+slippage   10bps              0.04%      11.86%   -11.82%  <- default
+slippage   20bps             -1.64%      11.76%   -13.40%
+slippage   30bps             -3.32%      11.70%   -15.02%
+slippage   50bps             -6.82%      11.53%   -18.35% 
+
+slippage at 10bps, commission schedule scaled
+                            strategy  buy & hold       gap
+----------------------------------------------------------
+commission free               7.23%      13.94%    -6.72%
+commission x0.5               3.67%      12.92%    -9.25%
+commission x1                 0.04%      11.86%   -11.82%  <- default
+commission x2                -7.05%       9.65%   -16.70%
+commission x4               -20.60%       5.03%   -25.64%  (! benchmark ran out of cash; not the whole universe) 
+
+the generous corner: no slippage, no commission, both arms
+                            strategy  buy & hold       gap
+----------------------------------------------------------
+frictionless                  9.12%      14.04%    -4.91% 
+
+The gap is negative at every setting, including a frictionless account.
+  Best case for the strategy (frictionless) still trails by 4.91%.
+  No error in the execution model explains being behind, so the finding
+  does not depend on what real fills turn out to cost.
+
+  4 windows per row. Every reported result elsewhere uses the default
+  row; this grid bounds a conclusion and is not a setting to choose from.

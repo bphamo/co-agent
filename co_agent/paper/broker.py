@@ -68,12 +68,30 @@ class PaperBroker:
 
     cash: float = 10_000.0
     slippage_bps: float = 10.0
+    #: Multiplier on the commission schedule. 1.0 is the Questrade-like default
+    #: and is what every reported result uses. `cycle/frictions.py` varies it to
+    #: ask how far a conclusion depends on the schedule -- which is the opposite
+    #: of picking a kinder one, and the only reason this knob exists.
+    commission_scale: float = 1.0
     positions: dict[str, Position] = field(default_factory=dict)
     fills: list[Fill] = field(default_factory=list)
     starting_cash: float = field(init=False)
 
     def __post_init__(self) -> None:
         self.starting_cash = self.cash
+
+    def _fee(self, qty: float) -> float:
+        return commission(qty) * self.commission_scale
+
+    @property
+    def _fee_ceiling(self) -> float:
+        """The most one order can be charged, used to reserve cash before trimming.
+
+        Scaled like the fee itself: reserving the unscaled ceiling while charging
+        a scaled fee lets a buy overdraw the account, which is the one thing the
+        broker must never do.
+        """
+        return MAX_COMMISSION * self.commission_scale
 
     # ------------------------------------------------------------------ orders
 
@@ -85,15 +103,15 @@ class PaperBroker:
         qty = float(int(notional // price))
         if qty <= 0:
             return None
-        fees = commission(qty)
+        fees = self._fee(qty)
         total = qty * price + fees
         if total > self.cash:
-            qty = float(int((self.cash - MAX_COMMISSION) // price))
+            qty = float(int((self.cash - self._fee_ceiling) // price))
             if qty <= 0:
                 raise InsufficientCash(
                     f"{symbol}: ${self.cash:,.2f} cash cannot buy one share at ${price:,.2f}"
                 )
-            fees = commission(qty)
+            fees = self._fee(qty)
             total = qty * price + fees
 
         self.cash -= total
@@ -114,7 +132,7 @@ class PaperBroker:
             return None
         qty = held.qty if qty is None else min(qty, held.qty)
         price = close * (1 - self.slippage_bps / 10_000)
-        fees = commission(qty)
+        fees = self._fee(qty)
         self.cash += qty * price - fees
 
         held.cost_basis *= 1 - qty / held.qty

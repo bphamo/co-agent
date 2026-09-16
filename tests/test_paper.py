@@ -158,3 +158,47 @@ def test_every_fill_is_a_buy_or_a_sell_of_whole_shares():
     assert [f.side for f in b.fills] == ["buy", "sell"]
     for f in b.fills:
         assert f.qty == int(f.qty) and f.qty > 0
+
+
+# ------------------------------------------------- the friction scale knob
+#
+# `commission_scale` exists so cycle/frictions.py can ask how far a conclusion
+# depends on the cost schedule. It must not weaken anything the broker
+# guarantees at the default, and 1.0 must be exactly the old behaviour.
+
+
+def test_the_default_commission_scale_changes_nothing():
+    plain = PaperBroker(cash=10_000, slippage_bps=0)
+    scaled = PaperBroker(cash=10_000, slippage_bps=0, commission_scale=1.0)
+    a = plain.buy("X.TO", DAY, 100.0, 5_000)
+    b = scaled.buy("X.TO", DAY, 100.0, 5_000)
+    assert a is not None and b is not None
+    assert (a.qty, a.fees, a.price) == (b.qty, b.fees, b.price)
+    assert plain.cash == scaled.cash
+
+
+def test_a_zero_scale_is_a_commission_free_account():
+    b = PaperBroker(cash=10_000, slippage_bps=0, commission_scale=0.0)
+    fill = b.buy("X.TO", DAY, 100.0, 5_000)
+    assert fill is not None and fill.fees == 0.0
+
+
+def test_a_raised_commission_still_cannot_overdraw_the_account():
+    """The cash reserve scales with the fee, or a costly order goes negative."""
+    for scale in (1.0, 2.0, 4.0, 10.0):
+        b = PaperBroker(cash=500, slippage_bps=10, commission_scale=scale)
+        try:
+            b.buy("X.TO", DAY, 100.0, 5_000)
+        except InsufficientCash:
+            pass
+        assert b.cash >= 0, f"scale {scale} drove cash to {b.cash}"
+
+
+def test_commission_scales_on_the_sell_side_too():
+    cheap = PaperBroker(cash=10_000, slippage_bps=0, commission_scale=1.0)
+    dear = PaperBroker(cash=10_000, slippage_bps=0, commission_scale=3.0)
+    for b in (cheap, dear):
+        b.buy("X.TO", DAY, 100.0, 5_000)
+    sold_cheap, sold_dear = cheap.sell("X.TO", DAY, 100.0), dear.sell("X.TO", DAY, 100.0)
+    assert sold_cheap is not None and sold_dear is not None
+    assert sold_dear.fees > sold_cheap.fees

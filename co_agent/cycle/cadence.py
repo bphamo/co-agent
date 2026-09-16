@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from datetime import date
 
 from ..data.prices import load_dir
-from ..paper import PaperBroker
+from ..paper import InsufficientCash, PaperBroker
 from ..sim.validate import market_drift_by_date
 from .candidates import MomentumScreen
 from .ledger import Ledger
@@ -85,6 +85,12 @@ class ArmResult:
     fills: int
     fees: float
     cycles: int
+    #: True when the benchmark ran out of cash before buying every name that
+    #: was *available at the window's start* -- not every name in the universe,
+    #: since an early window predates half of it. Only reachable at frictions
+    #: well above the default, and a caller comparing against a truncated
+    #: benchmark is comparing against something other than owning the universe.
+    truncated: bool = False
 
 
 def index_map(series: dict) -> dict:
@@ -123,21 +129,45 @@ def _final_marks(series: dict, idx: dict, days: list[date], symbols) -> dict[str
     return marks
 
 
-def equal_weight_buy_hold(series: dict, idx: dict, days: list[date]) -> ArmResult | None:
-    """The reference arm: buy the universe on day one, hold, same frictions."""
-    broker = PaperBroker(cash=START_CASH)
+def equal_weight_buy_hold(
+    series: dict,
+    idx: dict,
+    days: list[date],
+    *,
+    slippage_bps: float = 10.0,
+    commission_scale: float = 1.0,
+) -> ArmResult | None:
+    """The reference arm: buy the universe on day one, hold, same frictions.
+
+    The frictions are arguments so a sensitivity study can move them, and they
+    must move on *both* arms together -- a gap measured with one arm's frictions
+    changed is not a gap, it is a thumb on the scale.
+    """
+    broker = PaperBroker(
+        cash=START_CASH, slippage_bps=slippage_bps, commission_scale=commission_scale
+    )
     opening = closes_for(series, idx, days[0])
     if not opening:
         return None
     budget = START_CASH / len(opening)
+    truncated = False
     for symbol in sorted(opening):
-        broker.buy(symbol, days[0], opening[symbol], budget)
+        try:
+            broker.buy(symbol, days[0], opening[symbol], budget)
+        except InsufficientCash:
+            truncated = True
+            # Only reachable at frictions far above the default, where a single
+            # commission exceeds what is left. Stopping leaves the remainder in
+            # cash, which is what an equal-weight buyer would actually hold;
+            # `names` records the shortfall rather than hiding it.
+            break
     marks = _final_marks(series, idx, days, list(broker.positions))
     return ArmResult(
         ret=broker.equity(marks) / START_CASH - 1.0,
         fills=len(broker.fills),
         fees=sum(f.fees for f in broker.fills),
         cycles=1,
+        truncated=truncated,
     )
 
 
@@ -150,8 +180,12 @@ def run_arm(
     every: int,
     exit_on_falsifier: bool,
     screen: MomentumScreen,
+    slippage_bps: float = 10.0,
+    commission_scale: float = 1.0,
 ) -> ArmResult:
-    broker = PaperBroker(cash=START_CASH)
+    broker = PaperBroker(
+        cash=START_CASH, slippage_bps=slippage_bps, commission_scale=commission_scale
+    )
     engine = Engine(
         series=series,
         baseline_by_date=baseline,

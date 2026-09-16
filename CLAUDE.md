@@ -50,16 +50,77 @@ is the fastest way to move a return number without any edge behind it, and it
 would move the reported gap while making the system strictly worse. If an arm
 only beats buy and hold with leverage, it has not beaten buy and hold.
 
+## Simulation is the instrument, for now
+
+We simulate to start. That is the deliberate phase, not an apology: paper
+removes the broker dependency entirely, so the cycle, the gate, the sizing and
+the ledger can all be exercised before any account exists. The question that
+matters is therefore not "is the paper number right" -- it is not, exactly --
+but **does the paper number move the way the real one would?**
+
+**Why the gap and not the return.** Both arms take the same modelled fills at
+the same closes under the same slippage and commission, so friction error
+largely cancels between them. It does not cancel cleanly: over a year the
+strategy pays about 144 commissions and the benchmark about 43, so any error in
+the cost model hits the strategy roughly three times harder. That residual is
+the whole reason the gap needs a sensitivity check rather than trust.
+
+**What that check says today** (`co_agent/cycle/frictions.py`, output in
+`studies/frictions-2026-09-16.txt`, 4 windows spanning 2002-2026):
+
+```
+                    strategy   buy & hold      gap
+  frictionless         9.12%       14.04%   -4.91%
+  default (10bps)      0.04%       11.86%  -11.82%
+  50bps, x1           -6.82%       11.53%  -18.35%
+  10bps, x4          -20.60%        5.03%  -25.64%
+```
+
+The gap is negative at every setting, **including a frictionless account with no
+slippage and no commission on either arm**. The best case that could possibly
+exist for the strategy still trails by 4.91%. So being behind is not an artifact
+of the execution model, and that conclusion is insensitive to whatever real
+fills turn out to cost. Costs make it worse; they did not create it.
+
+Run `python -m co_agent.cycle.frictions` before quoting any gap as a finding.
+Both arms must always move together -- a gap measured with one arm's frictions
+changed is not a gap.
+
+## Graduating from paper
+
+The correlation that actually matters -- paper fills against real fills -- cannot
+be measured until real fills exist, so it is the last step and not the first.
+Before any real capital:
+
+1. **The gap is positive at the default frictions, and keeps its sign across the
+   whole grid.** A gap that only appears below 5bps is an execution fantasy.
+2. **Measured over the full cadence study, not one window.** 95 overlapping
+   windows, with the paired interval excluding zero. `bottom_line` is a
+   development signal; it is not the thing that clears this bar.
+3. **Against a point-in-time universe that includes delisted names.** Today's
+   benchmark is survivor-only and therefore flattered, so the measured gap is
+   *harsher* than the truth -- which is the safe direction for a bar to be wrong
+   in, and the wrong direction for a green light.
+4. **A resolved-outcome record in the ledger**, with calibration reported net of
+   `null_probability` (FR7), over enough resolved theses to mean something.
+5. **Then a deliberately small allocation**, with real fills recorded against the
+   paper model, so the friction assumptions get checked against reality rather
+   than against themselves. That measurement is what closes this section.
+
+None of these is met. The system is in step 0.
+
 ## What the goal does not license
 
 A money goal plus a fast feedback number is how a research system turns into an
 overfitted one. These hold regardless of what the gap says:
 
-- **Paper is not evidence.** Every fill is modelled at a daily close with 10bps
-  slippage and Questrade-like commission. `paper/broker.py` says a frictionless
-  paper broker is the single most reliable way to make a strategy look good, and
-  FR9 bans simulated equity curves for exactly that reason. Never present a paper
-  return as a result; present the gap, with its sample size.
+- **A paper *level* is not evidence; a paper *gap* is weak evidence.** Every fill
+  is modelled at a daily close with 10bps slippage and Questrade-like commission,
+  and `paper/broker.py` says a frictionless paper broker is the single most
+  reliable way to make a strategy look good. The gap is a paper number too --
+  both sides of it are -- but it is the more robust one, for the reason in
+  *Simulation is the instrument* below. Present the gap, with its sample size and
+  its friction sensitivity; never present a paper return on its own.
 - **The benchmark is flattered too.** The universe is survivor-only
   (`data/universes.py`), which biases buy and hold *up* most of all, since it
   holds every name for the whole window. The real gap is narrower than the
@@ -83,6 +144,7 @@ co_agent/sim/        FR9 simulation service (null_probability, p95_drawdown, the
 co_agent/cycle/      snapshot -> candidates -> gate -> decisions -> paper fills
 co_agent/cycle/cadence.py      the rolling-window study (slow, authoritative)
 co_agent/cycle/bottom_line.py  the fast check against the goal
+co_agent/cycle/frictions.py    how far the gap depends on the cost model
 co_agent/cycle/compare_arms.py both candidate sources against one live snapshot
 co_agent/data/       price loading and fetching
 db/                  the Postgres ledger schema
