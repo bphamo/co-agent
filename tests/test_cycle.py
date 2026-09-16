@@ -211,3 +211,88 @@ def test_the_ledger_encodes_dates_and_numpy_scalars(tmp_path):
 
 def test_reading_a_kind_that_was_never_written_is_empty(tmp_path):
     assert list(Ledger(tmp_path).read("nothing")) == []
+
+
+# --------------------------------------------------------------------- engine
+
+
+def engine_fixture(tmp_path, **kwargs):
+    from co_agent.cycle import Engine
+
+    s = universe(8)
+    return Engine(
+        series=s,
+        baseline_by_date=baselines(s),
+        source=MomentumScreen(lookback=60, horizon_days=5),
+        broker=PaperBroker(cash=10_000.0),
+        ledger=Ledger(tmp_path),
+        **kwargs,
+    ), s
+
+
+def test_a_falsifier_no_longer_closes_the_position_by_default(tmp_path):
+    """Separating the two is the fix; the default is hold-to-horizon.
+
+    A falsifier is tuned to trip about half the time, so using it as a stop
+    guarantees being stopped out on noise -- measured at 18 of 21 trips, and the
+    largest contributor to a -7.6% result in a +1.6% market.
+    """
+    engine, _ = engine_fixture(tmp_path)
+    assert engine.exit_on_falsifier is False
+    assert engine.stop_drop is None
+
+
+def test_a_thesis_records_its_outcome_once_even_when_held_past_resolution(tmp_path):
+    engine, s = engine_fixture(tmp_path)
+    days = s["S0.TO"].dates
+    start = days.index(days[1700])
+    engine.run_cycle(days[start])
+    assert engine.open_theses
+
+    for day in days[start + 1 : start + 12]:
+        engine.settle(day)
+
+    outcomes = list(engine.ledger.read("outcomes"))
+    ids = [o["thesis_id"] for o in outcomes]
+    assert len(ids) == len(set(ids)), "an outcome was recorded twice"
+    assert not engine.open_theses, "every position should have reached its horizon"
+    assert all(o["blinded"] for o in outcomes)
+
+
+def test_positions_exit_at_the_horizon_and_the_reason_is_recorded(tmp_path):
+    engine, s = engine_fixture(tmp_path)
+    days = s["S0.TO"].dates
+    start = days.index(days[1700])
+    engine.run_cycle(days[start])
+    for day in days[start + 1 : start + 12]:
+        engine.settle(day)
+
+    sells = [f for f in engine.ledger.read("fills") if f["side"] == "sell"]
+    assert sells
+    assert {f["reason"] for f in sells} <= {"horizon", "stop", "falsified"}
+    assert all(f["sessions_held"] <= 5 for f in sells)
+
+
+def test_a_stop_closes_the_position_early_when_one_is_set(tmp_path):
+    engine, s = engine_fixture(tmp_path, stop_drop=0.001)  # fires almost at once
+    days = s["S0.TO"].dates
+    start = days.index(days[1700])
+    engine.run_cycle(days[start])
+    for day in days[start + 1 : start + 4]:
+        engine.settle(day)
+
+    sells = [f for f in engine.ledger.read("fills") if f["side"] == "sell"]
+    assert any(f["reason"] == "stop" for f in sells)
+    # A position closed before its window ended is unresolvable, not true.
+    early = [o for o in engine.ledger.read("outcomes") if o["sessions_observed"] < 5]
+    assert all(o["result"] in {"false", "unresolvable"} for o in early)
+
+
+def test_concurrent_positions_stay_inside_max_open(tmp_path):
+    """The batch cap bounds what a human reviews; max_open bounds exposure."""
+    engine, s = engine_fixture(tmp_path, max_open=3)
+    days = s["S0.TO"].dates
+    start = days.index(days[1700])
+    for offset in (0, 1, 2):
+        engine.run_cycle(days[start + offset])
+        assert len(engine.open_theses) <= 3

@@ -49,6 +49,9 @@ class OpenThesis:
     null_probability: float
     weight: float
     observed: list[tuple[date, float]] = field(default_factory=list)
+    #: True once the thesis has been written to the ledger, so a position held
+    #: past its resolution does not record the outcome twice.
+    recorded: bool = False
 
 
 @dataclass(slots=True)
@@ -82,6 +85,23 @@ class Engine:
     #: of 6 before this existed.
     max_open: int = 8
     per_position_drawdown_limit: float = 0.025
+    #: Whether a tripped falsifier closes the position.
+    #:
+    #: Defaults to False, reversing the original design. A falsifier is *tuned
+    #: to trip*: the FR9 gate wants it in 0.30-0.70, so roughly half fire on
+    #: noise alone -- that is what makes it informative. A stop wants the
+    #: opposite, rare enough to fire only on information. Using one as the other
+    #: guarantees being stopped out of about half of all positions on noise,
+    #: paying spread and commission each time. Measured at 18 of 21 trips over
+    #: 43 sessions, and it was the largest single contributor to a -7.6% result
+    #: in a +1.6% market.
+    #:
+    #: The falsifier still resolves the thesis in the ledger either way. The two
+    #: jobs are simply separated.
+    exit_on_falsifier: bool = False
+    #: A genuine stop, as a fraction below entry. Sized to be rare, not
+    #: informative. None disables it.
+    stop_drop: float | None = None
     open_theses: dict[str, OpenThesis] = field(default_factory=dict)
     _index: dict[str, dict[date, int]] = field(default_factory=dict, init=False)
 
@@ -101,9 +121,14 @@ class Engine:
         return out
 
     def settle(self, day: date) -> list[str]:
-        """Resolve every open thesis against today, closing the ones that settle."""
+        """Resolve open theses against today, and close what the exit rule says to.
+
+        Resolution and exit are deliberately separate. A falsifier settles the
+        *thesis* -- that record goes to the ledger the moment it is decided. The
+        *position* closes on its own rule, which by default is the horizon.
+        """
         closes = self.closes_on(day)
-        settled: list[str] = []
+        closed: list[str] = []
         for thesis_id, open_thesis in list(self.open_theses.items()):
             close = closes.get(open_thesis.symbol)
             if close is None:
@@ -115,25 +140,56 @@ class Engine:
                 open_thesis.observed,
                 open_thesis.candidate.horizon_days,
             )
-            if outcome.result == "unresolvable":
+
+            if outcome.result != "unresolvable" and not open_thesis.recorded:
+                self.ledger.append(
+                    "outcomes",
+                    {
+                        "thesis_id": thesis_id, "resolved_at": day,
+                        "result": outcome.result, "evidence": outcome.evidence,
+                        "blinded": outcome.blinded, "resolver": "code",
+                        "sessions_observed": len(open_thesis.observed),
+                    },
+                )
+                open_thesis.recorded = True
+
+            sessions = len(open_thesis.observed)
+            stopped = (
+                self.stop_drop is not None
+                and close <= open_thesis.entry_close * (1 - self.stop_drop)
+            )
+            reached_horizon = sessions >= open_thesis.candidate.horizon_days
+            falsified_exit = self.exit_on_falsifier and outcome.result == "false"
+
+            if not (stopped or reached_horizon or falsified_exit):
                 continue
 
             self.broker.sell(open_thesis.symbol, day, close)
             self.ledger.append(
-                "outcomes",
+                "fills",
                 {
-                    "thesis_id": thesis_id,
-                    "resolved_at": day,
-                    "result": outcome.result,
-                    "evidence": outcome.evidence,
-                    "blinded": outcome.blinded,
-                    "resolver": "code",
-                    "sessions_observed": len(open_thesis.observed),
+                    "thesis_id": thesis_id, "symbol": open_thesis.symbol, "side": "sell",
+                    "filled_at": day, "close": close,
+                    "reason": "stop" if stopped else ("horizon" if reached_horizon else "falsified"),
+                    "sessions_held": sessions,
                 },
             )
+            if not open_thesis.recorded:
+                # Closed before the window ended and without the falsifier
+                # settling: the thesis is unresolvable, which is a first-class
+                # outcome rather than a row quietly dropped.
+                self.ledger.append(
+                    "outcomes",
+                    {
+                        "thesis_id": thesis_id, "resolved_at": day,
+                        "result": "unresolvable", "evidence": outcome.evidence,
+                        "blinded": True, "resolver": "code",
+                        "sessions_observed": sessions,
+                    },
+                )
             del self.open_theses[thesis_id]
-            settled.append(thesis_id)
-        return settled
+            closed.append(thesis_id)
+        return closed
 
     # ------------------------------------------------------------------ weekly
 
