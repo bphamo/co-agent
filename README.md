@@ -44,7 +44,7 @@ can, so don't point it at an untrusted conversation.
 ## Tests
 
 ```bash
-pytest                        # 112 tests, no network, no API key needed
+pytest                        # 197 tests, no network, no API key needed
 ./db/test/run_migrations.sh   # schema assertions against a throwaway cluster
 ```
 

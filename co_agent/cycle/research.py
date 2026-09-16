@@ -76,13 +76,22 @@ class LLMResearch:
 
     # ------------------------------------------------------------------ prompt
 
+    @staticmethod
+    def _ann_vol(returns: np.ndarray) -> float:
+        return float(returns[-60:].std() * np.sqrt(252))
+
+    def _mean_vol(self, snapshot: Snapshot) -> float:
+        return float(
+            np.mean([self._ann_vol(snapshot.histories[s]) for s in snapshot.universe])
+        )
+
     def _features(self, snapshot: Snapshot) -> str:
         rows = []
         for symbol in snapshot.universe:
             r = snapshot.histories[symbol]
             def ret(n: int) -> float:
                 return float(np.exp(r[-n:].sum()) - 1)
-            vol = float(r[-60:].std() * np.sqrt(252))
+            vol = self._ann_vol(r)
             rows.append(
                 f"{symbol:<10} close {snapshot.closes[symbol]:>9.2f}  "
                 f"1m {ret(21):>+7.1%}  3m {ret(63):>+7.1%}  12m {ret(252):>+7.1%}  "
@@ -92,6 +101,7 @@ class LLMResearch:
 
     def _prompt(self, snapshot: Snapshot, n: int) -> str:
         drop = suggested_threshold(self.horizon_days)
+        mean_vol = self._mean_vol(snapshot)
         return f"""You are proposing investment theses for a single private investor.
 
 Snapshot date: {snapshot.taken_at}. Every figure below is computed only from
@@ -116,12 +126,25 @@ Each thesis must be falsifiable in these fields and nothing else:
   a Brier score against realised outcomes, so systematically high confidence
   costs you; so does hedging everything to 0.5, which scores as no information.
 
-On the threshold: measured on this universe, a falsifier near {drop:.0%} at a
-{self.horizon_days}-day horizon trips roughly half the time by chance, which is
-where a falsifier carries the most information. Much tighter and it trips on
-noise; much wider and surviving it tells us nothing. Choose per name based on
-how volatile it is -- the table gives annualised volatility -- not by copying
-one number across all {n}.
+On the threshold, which is where these batches usually die. A falsifier carries
+the most information when it trips about half the time by chance. The gate
+rejects anything outside 0.30-0.70, and it measures that per name.
+
+{drop:.0%} is the figure for a name at this universe's *average* volatility,
+which is {mean_vol:.0%} annualised at this snapshot. It is not a floor, and it is
+not a default. Scale it linearly by the name's own volatility from the table:
+
+    threshold = {drop:.0%} * (that name's ann.vol / {mean_vol:.0%})
+
+So a {mean_vol * 0.5:.0%}-vol utility wants roughly {drop * 0.5:.1%}, not {drop:.0%};
+a {mean_vol * 1.6:.0%}-vol miner wants roughly {drop * 1.6:.1%}. Measured on this
+universe the coefficient holds to about +/-20% across the volatility range, which
+is well inside the band.
+
+The failure mode to avoid: anchoring on {drop:.0%} and only ever adjusting
+upward. A defensive name with a {drop:.0%} floor is asking whether something
+unlikely happens, the gate scores it near 0.20, and it is rejected as too hard
+before anyone reads the mechanism. Adjust in both directions.
 
 Pick names where you can state a real mechanism. Fewer good theses beat {n}
 padded ones, but return exactly {n} so the batch can be compared like for like."""
