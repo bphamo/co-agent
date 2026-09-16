@@ -15,16 +15,16 @@ import (
 )
 
 func main() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
+	// A .env file is optional: the API key can also come from the real
+	// environment (containers, CI, an exported shell var). godotenv does not
+	// overwrite variables that are already set, so the environment wins.
+	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
+		log.Fatalf("Error loading .env file: %s", err)
 	}
-	// Parse API key from .env and load into the anthropic instance
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
-		fmt.Println("Error: ANTHROPIC_API_KEY is not set")
-		return
+		log.Fatal("Error: ANTHROPIC_API_KEY is not set")
 	}
 
 	client := anthropic.NewClient(option.WithAPIKey(apiKey))
@@ -40,8 +40,7 @@ func main() {
 	tools := []tools.ToolDefinition{tools.ReadFileDefinition}
 
 	agent := agents.NewAgent(&client, getUserMessage, tools, anthropic.ModelClaude3_7SonnetLatest)
-	err = agent.Run(context.TODO())
-	if err != nil {
+	if err := agent.Run(context.TODO()); err != nil {
 		fmt.Printf("Error: %s\n", err.Error())
 	}
 }
