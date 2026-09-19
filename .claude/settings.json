@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/bottom-line.sh\"",
+            "timeout": 60,
+            "statusMessage": "Checking the bottom line against buy & hold..."
+          }
+        ]
+      }
+    ]
+  }
+}

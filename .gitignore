@@ -30,3 +30,20 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# fetched market data (not redistributed)
+/data/
+
+# stray artefacts from scratchpad scripts run with the repo as cwd
+/*.npy
